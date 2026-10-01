@@ -1,0 +1,86 @@
+from pathlib import Path
+
+from backend.app.analysis.moments import CandidateMoment, CandidateScores
+from backend.app.config import Settings
+from backend.app.db import Base, get_engine, init_db, session_factory
+from backend.app.models import Project
+from backend.app.services.pipeline import Pipeline
+
+
+class FakeYoutube:
+    def get_metadata(self, url):
+        from backend.app.services.youtube import VideoMetadata
+
+        return VideoMetadata("abc123", "Test video", 120.0, None)
+
+    def download_video(self, url, destination: Path):
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / "video.mp4"
+        path.write_bytes(b"not a real video in a unit test")
+        return path
+
+
+class FakeMedia:
+    def extract_audio(self, source_path, audio_path):
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+        return audio_path
+
+
+class FakeTranscriber:
+    def transcribe(self, audio_path):
+        return [
+            {"start": 0, "end": 4, "text": "Here is a useful standalone idea."},
+            {"start": 5, "end": 8, "text": "It has a clear payoff for viewers."},
+        ]
+
+
+class FakeAnalyzer:
+    def analyze(self, chunks):
+        return [
+            CandidateMoment(
+                start=0,
+                end=8,
+                title="A useful idea",
+                description="A concise standalone idea.",
+                reason="It has a setup and payoff.",
+                scores=CandidateScores(
+                    hook=8,
+                    clarity=8,
+                    standalone=9,
+                    novelty=7,
+                    emotional_interest=6,
+                    payoff=9,
+                ),
+            )
+        ]
+
+
+def test_pipeline_persists_transcript_and_moments(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    settings = Settings(database_url=database_url, storage_dir=tmp_path / "storage")
+    engine = get_engine(database_url)
+    Base.metadata.drop_all(engine)
+    init_db(database_url)
+    sessions = session_factory(database_url)
+    with sessions() as session:
+        project = Project(source_url="https://youtu.be/abc123")
+        session.add(project)
+        session.commit()
+        project_id = project.id
+
+    Pipeline(
+        settings,
+        youtube=FakeYoutube(),
+        media=FakeMedia(),
+        transcriber=FakeTranscriber(),
+        analyzer=FakeAnalyzer(),
+        make_session=sessions,
+    ).run(project_id)
+
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        assert project.status == "READY"
+        assert len(project.transcript_segments) == 2
+        assert len(project.moments) == 1
+        assert project.moments[0].score > 0

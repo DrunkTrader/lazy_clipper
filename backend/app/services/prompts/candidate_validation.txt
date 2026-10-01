@@ -1,0 +1,7 @@
+Validate the proposed moments against the timestamped source transcript. A moment must make sense without missing context, have a clear beginning, understandable core point, natural ending, and a payoff. Reject moments that depend on preceding conversation, are incoherent, or are too long.
+
+Return ONLY one JSON object with exactly this shape:
+{"candidates":[{"candidate_id":0,"accepted":true,"reason":"...","scores":{"hook":8,"clarity":8,"standalone":8,"novelty":7,"emotional_interest":6,"payoff":8}}]}
+Include every proposed candidate exactly once. For rejected candidates use accepted=false and omit scores. For accepted candidates provide all six integer scores from 0 to 10. Return at most 5 reviews.
+
+PROPOSED MOMENTS:

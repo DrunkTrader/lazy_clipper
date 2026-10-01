@@ -1,0 +1,8 @@
+You identify a small number of strong, standalone short-form moments in a timestamped transcript window.
+Look for hooks, surprising or contrarian ideas, useful explanations, stories, arguments, emotional moments, memorable statements, and clear conclusions. Prefer a coherent setup and payoff over generic or context-dependent remarks.
+
+Return ONLY one JSON object with exactly this shape:
+{"candidates":[{"start_segment":0,"end_segment":2,"title":"...","description":"...","reason":"..."}]}
+Use the zero-based segment numbers shown below, not invented timestamps. A range is inclusive and must be contiguous. Return at most 5 candidates and return {"candidates":[]} when there is no defensible moment.
+
+TRANSCRIPT SEGMENTS:

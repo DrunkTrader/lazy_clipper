@@ -1,0 +1,166 @@
+import subprocess
+import sys
+import types
+
+import pytest
+
+from backend.app.config import Settings
+from backend.app.services.media import FFmpegError, MediaService
+from backend.app.services.transcription import TranscriptionError, WhisperXTranscriber
+from backend.app.services.youtube import (
+    InvalidYouTubeURL,
+    MediaDependencyError,
+    YoutubeService,
+    canonical_youtube_url,
+)
+
+VIDEO_ID = "abc123_XYzz"
+VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
+
+
+def test_canonical_url_and_strict_validation():
+    assert canonical_youtube_url(f"https://youtu.be/{VIDEO_ID}?t=30") == VIDEO_URL
+    with pytest.raises(InvalidYouTubeURL):
+        canonical_youtube_url("https://www.youtube.com/watch?v=abc123")
+
+
+def test_youtube_metadata_uses_canonical_url_and_rejects_live(monkeypatch):
+    calls = {}
+
+    class FakeDownloader:
+        def __init__(self, options):
+            calls["options"] = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download):
+            calls["url"] = url
+            calls["download"] = download
+            return {"id": VIDEO_ID, "title": "Speech", "duration": 12, "thumbnail": None}
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeDownloader))
+    metadata = YoutubeService().get_metadata(f"https://youtu.be/{VIDEO_ID}?si=tracking")
+    assert metadata.youtube_id == VIDEO_ID
+    assert calls["url"] == VIDEO_URL
+    assert calls["download"] is False
+    assert calls["options"]["retries"] == 2
+    assert calls["options"]["noplaylist"] is True
+
+
+def test_youtube_rejects_live_metadata(monkeypatch):
+    class LiveDownloader:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download):
+            return {"id": VIDEO_ID, "is_live": True}
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=LiveDownloader))
+    with pytest.raises(MediaDependencyError, match="Live streams"):
+        YoutubeService().get_metadata(VIDEO_URL)
+
+
+def test_youtube_download_only_returns_complete_mp4_and_cleans_failure(monkeypatch, tmp_path):
+    destination = tmp_path / "source"
+    calls = {}
+
+    class FakeDownloader:
+        def __init__(self, options):
+            calls["options"] = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download):
+            calls["url"] = url
+            (destination / "video.mp4").write_bytes(b"mp4")
+            return {"id": VIDEO_ID}
+
+        def prepare_filename(self, info):
+            return str(destination / "video.mp4")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeDownloader))
+    result = YoutubeService().download_video(VIDEO_URL, destination)
+    assert result == destination / "video.mp4"
+    assert calls["options"]["max_filesize"] > 0
+    assert "avc1" in calls["options"]["format"]
+
+    class FailingDownloader(FakeDownloader):
+        def extract_info(self, url, download):
+            (destination / "video.mp4.part").write_bytes(b"partial")
+            raise RuntimeError("network failed")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FailingDownloader))
+    with pytest.raises(MediaDependencyError):
+        YoutubeService().download_video(VIDEO_URL, destination)
+    assert not list(destination.glob("video.*"))
+
+
+def test_whisperx_uses_silero_and_preserves_timestamps(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeModel:
+        def transcribe(self, audio, **options):
+            calls["transcribe"] = options
+            return {"segments": [{"start": 1.25, "end": 2.5, "text": "hello", "words": [{"word": "hello"}]}]}
+
+    fake_whisperx = types.SimpleNamespace(
+        load_model=lambda *args, **options: (calls.setdefault("load", (args, options)) and FakeModel()),
+        load_audio=lambda path: path,
+    )
+    monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"wav")
+    segments = WhisperXTranscriber(Settings()).transcribe(audio_path)
+    assert segments[0]["start"] == 1.25
+    assert segments[0]["words"] == [{"word": "hello"}]
+    assert calls["load"][1]["vad_method"] == "silero"
+    assert calls["load"][1]["threads"] == 2
+    assert calls["transcribe"]["batch_size"] == 1
+    assert calls["transcribe"]["num_workers"] == 0
+
+
+def test_whisperx_requires_real_audio(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "whisperx", types.SimpleNamespace())
+    with pytest.raises(TranscriptionError, match="missing or empty"):
+        WhisperXTranscriber(Settings()).transcribe(tmp_path / "missing.wav")
+
+
+def test_ffmpeg_is_noninteractive_bounded_and_removes_stale_output(monkeypatch, tmp_path):
+    source = tmp_path / "video.mp4"
+    output = tmp_path / "audio.wav"
+    source.write_bytes(b"video")
+    output.write_bytes(b"stale")
+    calls = {}
+
+    def fake_run(command, **kwargs):
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+        output.write_bytes(b"wav")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert MediaService(Settings()).extract_audio(source, output) == output
+    assert "-nostdin" in calls["command"]
+    assert calls["kwargs"]["timeout"] == 300
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(FFmpegError, match="timed out"):
+        MediaService(Settings()).extract_audio(source, output)
+    assert not output.exists()
