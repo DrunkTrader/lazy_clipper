@@ -66,6 +66,12 @@ class LLMClient:
                     temperature=getattr(self._settings, "llm_temperature", 0.2),
                     max_tokens=getattr(self._settings, "llm_max_tokens", 4000),
                 )
+            except Exception as exc:
+                # The SDK already applies its configured bounded retries for
+                # transport/rate-limit failures. Do not misreport a provider
+                # outage (for example HTTP 503) as malformed model JSON.
+                raise LLMResponseError(f"{stage} request failed: {exc}") from exc
+            try:
                 content = response.choices[0].message.content
                 if not content:
                     raise ValueError("empty response")
@@ -152,7 +158,12 @@ class MomentAnalyzer:
                     "title": item.title,
                     "description": item.description,
                     "reason": item.reason,
-                    "source_segments": list(range(item.start_segment, item.end_segment + 1)),
+                    # The model sees chunk-local indexes, but persisted
+                    # references must identify the original transcript rows.
+                    "source_segments": [
+                        int(source_item.get("segment_index", index))
+                        for index, source_item in enumerate(source)
+                    ],
                 })
             if not grounded:
                 continue

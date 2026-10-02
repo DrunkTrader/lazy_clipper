@@ -26,7 +26,7 @@ class Pipeline:
         make_session: Callable[[], Session] | None = None,
     ):
         self.settings = settings or get_settings()
-        self.youtube = youtube or YoutubeService()
+        self.youtube = youtube or YoutubeService(self.settings)
         self.media = media or MediaService(self.settings)
         self.transcriber = transcriber or WhisperXTranscriber(self.settings)
         self.analyzer = analyzer
@@ -50,21 +50,31 @@ class Pipeline:
             self._status(session, project, "INGESTING", "Reading video metadata")
             metadata = self.youtube.get_metadata(project.source_url)
             root = self.settings.project_storage(project_id)
-            source_path = self.youtube.download_video(project.source_url, root / "source")
-            audio_path = self.media.extract_audio(source_path, root / "audio" / "audio.wav")
+            # Persist metadata as soon as yt-dlp returns it. This keeps the
+            # project useful and diagnosable if a later media step fails.
             video = project.video or Video(project_id=project.id)
             video.youtube_id = metadata.youtube_id
             video.title = metadata.title
             video.duration = metadata.duration
             video.thumbnail_url = metadata.thumbnail_url
-            video.source_path = str(source_path)
-            video.audio_path = str(audio_path)
             project.title = metadata.title
+            session.add(video)
+            session.commit()
+
+            source_path = self.youtube.download_video(project.source_url, root / "source")
+            video.source_path = str(source_path)
+            session.add(video)
+            session.commit()
+
+            audio_path = self.media.extract_audio(source_path, root / "audio" / "audio.wav")
+            video.audio_path = str(audio_path)
             session.add(video)
             session.commit()
 
             self._status(session, project, "TRANSCRIBING", "Generating timestamped transcript")
             normalized = normalize_segments(self.transcriber.transcribe(audio_path))
+            if not normalized:
+                raise RuntimeError("Transcript normalization produced no valid segments")
             session.query(TranscriptSegment).filter_by(project_id=project.id).delete()
             for index, segment in enumerate(normalized):
                 session.add(TranscriptSegment(

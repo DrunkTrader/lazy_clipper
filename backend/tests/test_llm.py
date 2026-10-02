@@ -20,7 +20,10 @@ class FakeCompletions:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return FakeResponse(next(self.responses))
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return FakeResponse(response)
 
 
 class FakeOpenAI:
@@ -40,7 +43,13 @@ def install_fake_openai(monkeypatch, responses):
 
 
 def settings():
-    return Settings(llm_base_url="http://gateway.test/v1", llm_api_key="secret", llm_model="model-a")
+    # Keep this unit test independent of a developer's local .env.
+    return Settings(
+        llm_base_url="http://gateway.test/v1",
+        llm_api_key="secret",
+        llm_model="model-a",
+        llm_max_retries=2,
+    )
 
 
 def segment(start, end, text):
@@ -84,6 +93,12 @@ def test_missing_candidate_array_is_not_an_empty_result(monkeypatch):
         LLMClient(settings()).detect([segment(0, 20, "Text")])
 
 
+def test_provider_failure_is_reported_as_request_failure(monkeypatch):
+    install_fake_openai(monkeypatch, [RuntimeError("HTTP 503 provider unavailable")])
+    with pytest.raises(LLMResponseError, match="request failed.*503"):
+        LLMClient(settings()).detect([segment(0, 20, "Text")])
+
+
 def test_malformed_json_gets_one_bounded_correction(monkeypatch):
     calls = install_fake_openai(monkeypatch, ["not json", detection()])
     detected = LLMClient(settings()).detect([segment(0, 20, "Text")])
@@ -120,3 +135,13 @@ def test_deterministic_ranking_and_deduplication(monkeypatch):
     assert [item.title for item in result] == ["high"]
     assert result[0].start == 5
     assert len(calls.calls) == 4
+
+
+def test_source_segments_keep_project_indexes(monkeypatch):
+    install_fake_openai(monkeypatch, [detection(), review()])
+    chunks = [{"segments": [
+        {**segment(10, 20, "Setup"), "segment_index": 12},
+        {**segment(20, 40, "Payoff"), "segment_index": 13},
+    ]}]
+    result = MomentAnalyzer(settings(), client=LLMClient(settings())).analyze(chunks)
+    assert result[0].source_segments == [12, 13]

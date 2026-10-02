@@ -159,7 +159,9 @@ function App() {
   const mediaUrl = getMediaUrl(project)
   const title = getString(project?.title) ?? getString(asRecord(project?.video).title) ?? 'Untitled project'
   const sourceUrl = getString(project?.source_url) ?? getString(project?.url)
-  const statusMessage = getString(status?.message) ?? getString(status?.error)
+  const statusMessage = failed
+    ? (getString(status?.error) ?? getString(status?.message))
+    : (getString(status?.message) ?? getString(status?.error))
 
   const sortedTranscript = useMemo(
     () => [...transcript].sort((a, b) => (a.start ?? 0) - (b.start ?? 0)),
