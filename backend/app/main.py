@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import router
 from .config import get_settings
 from .db import init_db
-from .services.pipeline import run_pipeline
+from .services.pipeline import render_project_clips, run_pipeline
 
 
 @asynccontextmanager
@@ -18,6 +18,7 @@ async def lifespan(app: FastAPI):
     executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lazyclipper")
     app.state.pipeline_executor = executor
     app.state.pipeline_runner = run_pipeline
+    app.state.clip_runner = render_project_clips
     try:
         yield
     finally:

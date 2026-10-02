@@ -1,29 +1,47 @@
-# Node 22+ is required by current yt-dlp EJS support. Keep it in the
-# container so ingestion never depends on a host Node.js installation.
+# syntax=docker/dockerfile:1
+# Keep Node and Python on the same Debian release for runtime compatibility.
 FROM node:22.23.3-bookworm-slim AS node-runtime
 
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm AS dependencies
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv "$VIRTUAL_ENV"
+
+WORKDIR /build
+COPY pyproject.toml ./
+# Read dependency declarations from their existing source of truth. Source-code
+# edits must not invalidate the expensive WhisperX/PyTorch installation layer.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -c 'import subprocess, tomllib; project = tomllib.load(open("pyproject.toml", "rb"))["project"]; subprocess.check_call(["python", "-m", "pip", "install", *project["dependencies"], *project["optional-dependencies"]["transcription"]])'
+
+FROM python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-# yt-dlp's JavaScript challenge solver runs through Node.js. yt-dlp itself
-# is installed from pyproject.toml below, never from the OS package manager.
+# Compilers stay in the build stage. FFmpeg and OpenMP are runtime dependencies.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg build-essential \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg libgomp1 \
     && rm -rf /var/lib/apt/lists/*
-
+COPY --from=dependencies /opt/venv /opt/venv
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 
 WORKDIR /app
-COPY pyproject.toml ./
-COPY backend ./backend
-RUN pip install ".[transcription]" \
-    && python -m pip show yt-dlp yt-dlp-ejs \
-    && command -v yt-dlp \
+COPY backend/__init__.py ./backend/__init__.py
+COPY backend/app ./backend/app
+# Fail the image build early if required runtime components are unavailable.
+RUN python -m pip check \
+    && python -c "import backend.app.main; import yt_dlp; import whisperx" \
     && node --version \
-    && ffmpeg -version >/dev/null
+    && ffmpeg -version >/dev/null \
+    && ffprobe -version >/dev/null
 
 EXPOSE 8000
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

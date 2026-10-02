@@ -43,7 +43,7 @@ User Selects a Moment
     ↓
 Clip Preparation
     ↓
-Optional MVP Render
+ MVP Render
 ```
 
 The first MVP milestone should stop around **clip selection and basic preparation**, with simple FFmpeg rendering added if practical.
@@ -71,7 +71,7 @@ The user flow should be:
 9. Video seeks to that timestamp
 10. User opens the moment in the clip editor
 11. User can adjust start/end
-12. Optional render creates the clip
+12. render creates the clip
 ```
 
 Errors should produce an explicit:

@@ -34,6 +34,25 @@ export type Moment = JsonObject & {
   reason?: string
 }
 
+export type ClipStatus = 'QUEUED' | 'RENDERING' | 'READY' | 'FAILED'
+
+export type GeneratedClip = {
+  id: string
+  project_id: string
+  moment_id: string
+  start: number
+  end: number
+  status: ClipStatus
+  error_message: string | null
+  media_url: string | null
+  download_url: string | null
+}
+
+export type ClipsResponse = {
+  project_id: string
+  clips: GeneratedClip[]
+}
+
 export class ApiError extends Error {
   readonly status: number
 
@@ -90,6 +109,10 @@ export function createProject(url: string): Promise<JsonObject> {
   })
 }
 
+export function getProjects(): Promise<Project[]> {
+  return request<Project[]>('/api/v1/projects')
+}
+
 export function getProject(projectId: string): Promise<Project> {
   return request<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}`)
 }
@@ -104,6 +127,14 @@ export function getTranscript(projectId: string): Promise<unknown> {
 
 export function getMoments(projectId: string): Promise<unknown> {
   return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`)
+}
+
+export function getClips(projectId: string): Promise<ClipsResponse> {
+  return request<ClipsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`)
+}
+
+export function generateClips(projectId: string): Promise<{ project_id: string; status: 'rendering' }> {
+  return request(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, { method: 'POST' })
 }
 
 export function asRecord(value: unknown): JsonObject {

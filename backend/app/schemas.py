@@ -86,3 +86,22 @@ class MomentResponse(BaseModel):
 class MomentsResponse(BaseModel):
     project_id: str
     moments: list[MomentResponse]
+
+
+class ClipResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    moment_id: str
+    start: float
+    end: float
+    status: str
+    error_message: str | None = None
+    media_url: str | None = None
+    download_url: str | None = None
+
+
+class ClipsResponse(BaseModel):
+    project_id: str
+    clips: list[ClipResponse]

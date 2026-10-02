@@ -26,6 +26,11 @@ class FakeMedia:
         audio_path.write_bytes(b"audio")
         return audio_path
 
+    def render_clip(self, source_path, output_path, start, end):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"unit-test clip")
+        return output_path
+
 
 class FailingMedia(FakeMedia):
     def extract_audio(self, source_path, audio_path):
@@ -94,6 +99,33 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
         assert len(project.transcript_segments) == 2
         assert len(project.moments) == 1
         assert project.moments[0].score > 0
+        assert len(project.clips) == 1
+        assert project.clips[0].status == "READY"
+        assert project.clips[0].moment_id == project.moments[0].id
+        assert Path(project.clips[0].output_path).is_file()
+
+    class UnexpectedCall:
+        def __getattr__(self, name):
+            raise AssertionError(f"Persisted stage was rerun: {name}")
+
+    # Simulate an explicit retry after a later failure. Previously this always
+    # redownloaded the video and deleted/replaced transcript and moment rows.
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        project.status = "FAILED"
+        clip_id = project.clips[0].id
+        source_mtime = Path(project.video.source_path).stat().st_mtime_ns
+        session.commit()
+    unused = UnexpectedCall()
+    pipeline = Pipeline(settings, youtube=unused, media=unused, transcriber=unused, analyzer=unused, make_session=sessions)
+    pipeline.run(project_id)
+    pipeline.run(project_id)  # READY projects are also no-ops.
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        assert project.status == "READY"
+        assert len(project.clips) == 1
+        assert project.clips[0].id == clip_id
+        assert Path(project.video.source_path).stat().st_mtime_ns == source_mtime
 
 
 def test_pipeline_fails_when_normalization_removes_all_transcript_data(tmp_path):
