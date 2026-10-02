@@ -35,6 +35,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./storage:/app/storage
+      - whisper_cache:/root/.cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,3 +57,4 @@ services:
 volumes:
   postgres_data:
   frontend_node_modules:
+  whisper_cache:

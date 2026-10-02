@@ -7,6 +7,7 @@ from typing import Any
 from ..analysis.moments import (
     MAX_CANDIDATES_PER_CHUNK,
     MAX_MOMENT_SECONDS,
+    MIN_MOMENT_SECONDS,
     CandidateMoment,
     DetectionResponse,
     ValidationResponse,
@@ -142,7 +143,7 @@ class MomentAnalyzer:
                 source = segments[item.start_segment : item.end_segment + 1]
                 start = float(source[0]["start"])
                 end = float(source[-1]["end"])
-                if end <= start or end - start > MAX_MOMENT_SECONDS:
+                if end <= start or end - start < MIN_MOMENT_SECONDS or end - start > MAX_MOMENT_SECONDS:
                     continue
                 grounded.append({
                     "candidate_id": len(grounded),
