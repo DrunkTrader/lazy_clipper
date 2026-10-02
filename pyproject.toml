@@ -14,8 +14,8 @@ dependencies = [
   "pydantic-settings>=2.6,<3",
   "sqlalchemy>=2.0,<3",
   "psycopg[binary]>=3.2,<4",
-  "yt-dlp>=2024.12",
-  "yt-dlp-ejs>=0.8",
+  "yt-dlp==2026.8.19",
+  "yt-dlp-ejs==0.8.0",
   "openai>=1.54,<2",
 ]
 

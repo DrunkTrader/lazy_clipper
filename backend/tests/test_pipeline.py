@@ -27,12 +27,22 @@ class FakeMedia:
         return audio_path
 
 
+class FailingMedia(FakeMedia):
+    def extract_audio(self, source_path, audio_path):
+        raise RuntimeError("ffmpeg failed")
+
+
 class FakeTranscriber:
     def transcribe(self, audio_path):
         return [
             {"start": 0, "end": 4, "text": "Here is a useful standalone idea."},
             {"start": 5, "end": 8, "text": "It has a clear payoff for viewers."},
         ]
+
+
+class InvalidTranscriber:
+    def transcribe(self, audio_path):
+        return [{"start": 4, "end": 4, "text": "invalid"}]
 
 
 class FakeAnalyzer:
@@ -84,3 +94,55 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
         assert len(project.transcript_segments) == 2
         assert len(project.moments) == 1
         assert project.moments[0].score > 0
+
+
+def test_pipeline_fails_when_normalization_removes_all_transcript_data(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    settings = Settings(database_url=database_url, storage_dir=tmp_path / "storage")
+    engine = get_engine(database_url)
+    Base.metadata.drop_all(engine)
+    init_db(database_url)
+    sessions = session_factory(database_url)
+    with sessions() as session:
+        project = Project(source_url="https://youtu.be/abc123")
+        session.add(project)
+        session.commit()
+        project_id = project.id
+
+    Pipeline(
+        settings,
+        youtube=FakeYoutube(),
+        media=FakeMedia(),
+        transcriber=InvalidTranscriber(),
+        make_session=sessions,
+    ).run(project_id)
+
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        assert project.status == "FAILED"
+        assert project.error_message == "Transcript normalization produced no valid segments"
+
+
+def test_pipeline_keeps_metadata_when_media_fails(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    settings = Settings(database_url=database_url, storage_dir=tmp_path / "storage")
+    engine = get_engine(database_url)
+    Base.metadata.drop_all(engine)
+    init_db(database_url)
+    sessions = session_factory(database_url)
+    with sessions() as session:
+        project = Project(source_url="https://youtu.be/abc123")
+        session.add(project)
+        session.commit()
+        project_id = project.id
+
+    Pipeline(settings, youtube=FakeYoutube(), media=FailingMedia(), make_session=sessions).run(project_id)
+
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        assert project.status == "FAILED"
+        assert project.title == "Test video"
+        assert project.video is not None
+        assert project.video.title == "Test video"
+        assert project.video.source_path is not None
+        assert project.video.audio_path is None

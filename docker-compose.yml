@@ -29,12 +29,17 @@ services:
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-4000}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-120}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      YTDLP_COOKIE_FILE: ${YTDLP_COOKIE_FILE:-/app/cookies.txt}
+      YTDLP_JS_RUNTIME: ${YTDLP_JS_RUNTIME:-node}
     ports:
       - "8000:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./storage:/app/storage
+      # Optional authentication cookies for YouTube. The application ignores
+      # this path when it is absent or is not a regular file.
+      - ./cookies.txt:/app/cookies.txt:ro
       - whisper_cache:/root/.cache
     depends_on:
       postgres:

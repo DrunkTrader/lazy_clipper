@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("storage")
     ffmpeg_binary: str = "ffmpeg"
     yt_dlp_binary: str = "yt-dlp"
+    ytdlp_js_runtime: str = Field(default="node", min_length=1)
+    ytdlp_cookie_file: Path | None = None
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"

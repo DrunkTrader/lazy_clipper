@@ -54,6 +54,8 @@ class WhisperXTranscriber:
             segments = result.get("segments", []) if isinstance(result, dict) else []
             if not isinstance(segments, list):
                 raise TranscriptionError("WhisperX returned invalid segments")
+            if not segments:
+                raise TranscriptionError("WhisperX returned no transcript segments")
             # Keep WhisperX's start/end and optional words untouched for the
             # downstream clipper; no fake fallback transcript is permitted.
             return [dict(segment) for segment in segments]

@@ -1,8 +1,13 @@
 """YouTube URL validation and yt-dlp integration."""
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlencode, urlparse
 import re
+import shutil
+
+from ..config import Settings, get_settings
 
 
 class MediaDependencyError(RuntimeError):
@@ -76,6 +81,9 @@ class VideoMetadata:
 
 
 class YoutubeService:
+    def __init__(self, settings: Settings | None = None):
+        self.settings = settings or get_settings()
+
     def _module(self):
         try:
             import yt_dlp  # lazy optional dependency
@@ -83,9 +91,8 @@ class YoutubeService:
             raise MediaDependencyError("yt-dlp is required for YouTube ingestion") from exc
         return yt_dlp
 
-    @staticmethod
-    def _options(*, skip_download: bool) -> dict:
-        return {
+    def _options(self, *, skip_download: bool) -> dict:
+        options = {
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -95,7 +102,35 @@ class YoutubeService:
             "extractor_retries": 2,
             "socket_timeout": _DOWNLOAD_TIMEOUT,
             "match_filter": YoutubeService._live_match_filter,
+            # yt-dlp-ejs uses the configured runtime to solve YouTube's
+            # current JavaScript challenges. This is intentionally a runtime
+            # name, never a developer-specific absolute path.
+            "js_runtimes": {self.settings.ytdlp_js_runtime: {}},
         }
+        cookie_file = self.settings.ytdlp_cookie_file
+        if cookie_file is not None and cookie_file.is_file():
+            options["cookiefile"] = str(cookie_file)
+        return options
+
+    @contextmanager
+    def _options_context(self, *, skip_download: bool):
+        """Yield yt-dlp options with a writable runtime cookie copy.
+
+        Compose mounts the source cookie file read-only. yt-dlp may persist
+        refreshed cookies when it closes, so use a short-lived 0600 copy and
+        never attempt to write back to the mounted authentication file.
+        """
+        options = self._options(skip_download=skip_download)
+        cookie_file = options.get("cookiefile")
+        if not cookie_file:
+            yield options
+            return
+        with TemporaryDirectory(prefix="lazyclipper-ytdlp-") as temp_dir:
+            runtime_cookie_file = Path(temp_dir) / "cookies.txt"
+            shutil.copyfile(cookie_file, runtime_cookie_file)
+            runtime_cookie_file.chmod(0o600)
+            options["cookiefile"] = str(runtime_cookie_file)
+            yield options
 
     @staticmethod
     def _reject_live(info: dict) -> None:
@@ -112,10 +147,10 @@ class YoutubeService:
     def get_metadata(self, url: str) -> VideoMetadata:
         video_id = validate_youtube_url(url)
         yt_dlp = self._module()
-        options = self._options(skip_download=True)
         try:
-            with yt_dlp.YoutubeDL(options) as downloader:
-                info = downloader.extract_info(_canonical_video_url(video_id), download=False)
+            with self._options_context(skip_download=True) as options:
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    info = downloader.extract_info(_canonical_video_url(video_id), download=False)
             self._reject_live(info)
             actual_id = str(info.get("id") or video_id)
             if actual_id != video_id:
@@ -140,23 +175,23 @@ class YoutubeService:
         for stale in destination.glob("video.*"):
             if stale.is_file():
                 stale.unlink()
-        options = self._options(skip_download=False)
-        options.update({
-            # Prefer a browser-compatible H.264/AAC MP4 and cap the selected size.
-            "format": "bv*[vcodec^=avc1][ext=mp4][height<=1080]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4][height<=1080]/bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]",
-            "merge_output_format": "mp4",
-            "outtmpl": output_template,
-            "max_filesize": _MAX_DOWNLOAD_BYTES,
-            "overwrites": True,
-        })
         try:
-            with yt_dlp.YoutubeDL(options) as downloader:
-                info = downloader.extract_info(_canonical_video_url(video_id), download=True)
-                self._reject_live(info)
-                actual_id = str(info.get("id") or video_id)
-                if actual_id != video_id:
-                    raise MediaDependencyError("YouTube returned a different video id")
-                prepared = Path(downloader.prepare_filename(info))
+            with self._options_context(skip_download=False) as options:
+                options.update({
+                    # Prefer a browser-compatible H.264/AAC MP4 and cap the selected size.
+                    "format": "bv*[vcodec^=avc1][ext=mp4][height<=1080]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4][height<=1080]/bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]",
+                    "merge_output_format": "mp4",
+                    "outtmpl": output_template,
+                    "max_filesize": _MAX_DOWNLOAD_BYTES,
+                    "overwrites": True,
+                })
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    info = downloader.extract_info(_canonical_video_url(video_id), download=True)
+                    self._reject_live(info)
+                    actual_id = str(info.get("id") or video_id)
+                    if actual_id != video_id:
+                        raise MediaDependencyError("YouTube returned a different video id")
+                    prepared = Path(downloader.prepare_filename(info))
         except MediaDependencyError:
             for stale in destination.glob("video.*"):
                 if stale.is_file():

@@ -1,3 +1,4 @@
+from pathlib import Path
 import subprocess
 import sys
 import types
@@ -22,6 +23,26 @@ def test_canonical_url_and_strict_validation():
     assert canonical_youtube_url(f"https://youtu.be/{VIDEO_ID}?t=30") == VIDEO_URL
     with pytest.raises(InvalidYouTubeURL):
         canonical_youtube_url("https://www.youtube.com/watch?v=abc123")
+
+
+def test_youtube_options_use_node_and_optional_cookie_file(tmp_path):
+    settings = Settings(ytdlp_js_runtime="node", ytdlp_cookie_file=tmp_path / "cookies.txt")
+    service = YoutubeService(settings)
+    options = service._options(skip_download=True)
+    assert options["js_runtimes"] == {"node": {}}
+    assert "cookiefile" not in options
+
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("# test cookie file\n", encoding="utf-8")
+    options = service._options(skip_download=True)
+    assert options["cookiefile"] == str(cookie_file)
+
+    with service._options_context(skip_download=True) as runtime_options:
+        runtime_cookie = Path(runtime_options["cookiefile"])
+        assert runtime_cookie != cookie_file
+        assert runtime_cookie.read_text(encoding="utf-8") == cookie_file.read_text(encoding="utf-8")
+        assert runtime_cookie.is_file()
+    assert not Path(runtime_options["cookiefile"]).exists()
 
 
 def test_youtube_metadata_uses_canonical_url_and_rejects_live(monkeypatch):
@@ -137,6 +158,22 @@ def test_whisperx_requires_real_audio(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "whisperx", types.SimpleNamespace())
     with pytest.raises(TranscriptionError, match="missing or empty"):
         WhisperXTranscriber(Settings()).transcribe(tmp_path / "missing.wav")
+
+
+def test_whisperx_rejects_empty_transcript(monkeypatch, tmp_path):
+    class EmptyModel:
+        def transcribe(self, audio, **options):
+            return {"segments": []}
+
+    fake_whisperx = types.SimpleNamespace(
+        load_model=lambda *args, **options: EmptyModel(),
+        load_audio=lambda path: path,
+    )
+    monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"wav")
+    with pytest.raises(TranscriptionError, match="no transcript segments"):
+        WhisperXTranscriber(Settings()).transcribe(audio_path)
 
 
 def test_ffmpeg_is_noninteractive_bounded_and_removes_stale_output(monkeypatch, tmp_path):
