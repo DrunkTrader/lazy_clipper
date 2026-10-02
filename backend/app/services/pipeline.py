@@ -1,11 +1,10 @@
 """In-process project processing pipeline."""
 import json
-from pathlib import Path
 from typing import Callable
 
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
-from ..analysis.moments import CandidateMoment, calculate_composite_score
+from ..analysis.moments import calculate_composite_score
 from ..analysis.transcript import chunk_segments, normalize_segments
 from ..config import Settings, get_settings
 from ..db import session_factory
