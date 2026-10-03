@@ -35,6 +35,7 @@ class Project(Base):
     moments: Mapped[list["Moment"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="Moment.rank"
     )
+    clips: Mapped[list["Clip"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class Video(Base):
@@ -85,3 +86,19 @@ class Moment(Base):
     dimensions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="moments")
+
+
+class Clip(Base):
+    __tablename__ = "clips"
+    __table_args__ = (UniqueConstraint("moment_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    moment_id: Mapped[str] = mapped_column(ForeignKey("moments.id", ondelete="CASCADE"), nullable=False)
+    start: Mapped[float] = mapped_column(Float, nullable=False)
+    end: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="clips")
