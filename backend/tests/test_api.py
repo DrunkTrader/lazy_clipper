@@ -126,7 +126,11 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
         session.get(Clip, clip_id).output_path = str(source)
         session.commit()
     assert api_client.get(response["media_url"]).status_code == 404
-    assert api_client.get(base + "/clips").json()["clips"][0]["status"] == "FAILED"
+    missing = api_client.get(base + "/clips").json()["clips"][0]
+    assert missing["status"] == "FAILED"
+    assert missing["failed_stage"] == "media"
+    assert missing["error"]["message"] == "Internal server error while loading media."
+    assert missing["media_url"] is None and missing["download_url"] is None
 
     from backend.app.main import app
 
@@ -139,6 +143,26 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
     assert api_client.post(base + "/clips", json=request).status_code == 409
     assert submitted == [(app.state.clip_runner, project_id, clip_id)]
     assert api_client.get(base + "/status").json()["status"] == "RENDERING"
+
+    # A failed submission stays isolated and retryable, without exposing the
+    # executor's internal exception or leaving the clip permanently queued.
+    with session_factory()() as session:
+        session.get(Project, project_id).status = "READY"
+        session.get(Clip, clip_id).status = "FAILED"
+        session.commit()
+
+    def unavailable(*args):
+        raise RuntimeError("private executor diagnostic")
+
+    monkeypatch.setattr(app.state.pipeline_executor, "submit", unavailable)
+    response = api_client.post(base + "/clips", json=request)
+    assert response.status_code == 503
+    assert response.json()["failed_stage"] == "rendering"
+    assert "private executor diagnostic" not in response.text
+    assert api_client.get(base + "/status").json()["status"] == "READY"
+    clip = api_client.get(base + "/clips").json()["clips"][0]
+    assert clip["status"] == "FAILED"
+    assert clip["error_message"] == "Internal server error while generating the clip."
 
 
 def test_source_video_is_not_served(api_client):

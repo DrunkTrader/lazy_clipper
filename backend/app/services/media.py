@@ -1,4 +1,4 @@
-"""FFmpeg wrappers for audio extraction and deterministic vertical clips."""
+"""FFmpeg wrappers for audio extraction and deterministic captioned clips."""
 from pathlib import Path
 import math
 import subprocess
@@ -64,20 +64,34 @@ class MediaService:
             raise FFmpegError("FFmpeg completed without producing a non-empty audio file")
         return audio_path
 
-    def render_clip(self, source_path: Path, output_path: Path, start: float, end: float) -> Path:
+    def render_clip(
+        self,
+        source_path: Path,
+        output_path: Path,
+        start: float,
+        end: float,
+        *,
+        subtitle_path: Path | None = None,
+    ) -> Path:
         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
             raise FFmpegError("Clip timestamps must be finite, with 0 <= start < end")
         if not source_path.is_file() or source_path.stat().st_size == 0:
             raise FFmpegError("Source video is missing or empty")
+        if subtitle_path is not None and (not subtitle_path.is_file() or subtitle_path.stat().st_size == 0):
+            raise FFmpegError("Caption subtitle file is missing or empty")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         # Only publish a completed MP4; an interrupted render is never reusable.
         temporary = output_path.with_name(output_path.stem + ".partial.mp4")
         temporary.unlink(missing_ok=True)
+        video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1"
+        if subtitle_path is not None:
+            escaped_subtitle_path = str(subtitle_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            video_filter += f",subtitles={escaped_subtitle_path}"
         command = [
             self.settings.ffmpeg_binary, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-abort_on", "empty_output", "-ss", str(start), "-i", str(source_path),
             "-t", str(end - start), "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1",
+            "-vf", video_filter,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
             "-r", "30", "-threads", "2", "-filter_threads", "2",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(temporary),

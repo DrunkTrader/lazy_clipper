@@ -8,6 +8,7 @@ import re
 import shutil
 
 from ..config import Settings, get_settings
+from ..logging import logger
 
 
 class MediaDependencyError(RuntimeError):
@@ -95,6 +96,9 @@ class YoutubeService:
         options = {
             "quiet": True,
             "no_warnings": True,
+            # Route yt-dlp errors through our redacting handler rather than its
+            # direct stderr output (which may include cookies or signed URLs).
+            "logger": logger,
             "noplaylist": True,
             "skip_download": skip_download,
             "retries": 2,

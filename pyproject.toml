@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 transcription = [
-  "whisperx>=3.3,<4",
+  "whisper-timestamped>=1.15,<2",
 ]
 test = [
   "pytest>=8,<9",

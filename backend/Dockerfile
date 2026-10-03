@@ -15,9 +15,26 @@ RUN apt-get update \
 WORKDIR /build
 COPY pyproject.toml ./
 # Read dependency declarations from their existing source of truth. Source-code
-# edits must not invalidate the expensive WhisperX/PyTorch installation layer.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python -c 'import subprocess, tomllib; project = tomllib.load(open("pyproject.toml", "rb"))["project"]; subprocess.check_call(["python", "-m", "pip", "install", *project["dependencies"], *project["optional-dependencies"]["transcription"]])'
+# edits must not invalidate the expensive transcription/PyTorch installation layer.
+RUN --mount=type=cache,target=/root/.cache/pip python - <<'PY'
+import platform
+import subprocess
+import sys
+import tomllib
+
+with open("pyproject.toml", "rb") as manifest:
+    project = tomllib.load(manifest)["project"]
+requirements = project["dependencies"] + project["optional-dependencies"]["transcription"]
+install = [sys.executable, "-m", "pip", "install"]
+if platform.machine().lower() not in {"x86_64", "amd64"}:
+    # Match WhisperX's non-x86 Linux CPU index and compatible Torch 2.8 pair.
+    # ARM64 Torchaudio 2.8's CPU wheel has no +cpu version suffix.
+    cpu_requirements = ["torch==2.8.0+cpu", "torchaudio==2.8.0"]
+    subprocess.check_call(install + ["--index-url", "https://download.pytorch.org/whl/cpu"] + cpu_requirements)
+    # Keep the CPU build pinned when resolving the application's dependencies.
+    requirements += cpu_requirements
+subprocess.check_call(install + requirements)
+PY
 
 FROM python:3.12-slim-bookworm AS runtime
 
@@ -38,10 +55,10 @@ COPY backend/__init__.py ./backend/__init__.py
 COPY backend/app ./backend/app
 # Fail the image build early if required runtime components are unavailable.
 RUN python -m pip check \
-    && python -c "import backend.app.main; import yt_dlp; import whisperx" \
+    && python -c "import backend.app.main; import yt_dlp; import whisper_timestamped" \
     && node --version \
     && ffmpeg -version >/dev/null \
     && ffprobe -version >/dev/null
 
 EXPOSE 8000
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

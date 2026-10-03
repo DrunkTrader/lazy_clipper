@@ -9,6 +9,7 @@ import pytest
 from backend.app.config import Settings
 from backend.app.db import init_db, session_factory
 from backend.app.models import Clip, Moment, Project, Video
+from backend.app.services.captions import write_ass
 from backend.app.services.media import FFmpegError, MediaService
 from backend.app.services.pipeline import Pipeline
 
@@ -22,7 +23,11 @@ def test_real_vertical_mp4_render(tmp_path):
         "-c:v", "libx264", "-threads", "2", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
     ], check=True, timeout=30)
     media = MediaService(Settings())
-    output = media.render_clip(source, tmp_path / "clips" / "clip.mp4", 0.5, 2)
+    subtitle = write_ass(tmp_path / "captions.ass", [
+        {"word": "captions", "start": 0.5, "end": 1.0},
+        {"word": "work", "start": 1.0, "end": 1.5},
+    ], 0.5, 2)
+    output = media.render_clip(source, tmp_path / "clips" / "clip.mp4", 0.5, 2, subtitle_path=subtitle)
     probe = json.loads(subprocess.check_output([
         "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(output),
     ], timeout=30))
@@ -63,10 +68,11 @@ def test_clip_failure_is_isolated_and_retry_keeps_successes(tmp_path):
         fail = True
         calls = []
 
-        def render_clip(self, source_path, output_path, start, end):
+        def render_clip(self, source_path, output_path, start, end, *, subtitle_path=None):
             self.calls.append(start)
             if start == 0 and self.fail:
                 raise FFmpegError("Encoder unavailable")
+            assert subtitle_path is not None and subtitle_path.is_file()
             output_path.write_bytes(b"rendered clip")
             return output_path
 
@@ -78,7 +84,7 @@ def test_clip_failure_is_isolated_and_retry_keeps_successes(tmp_path):
         assert project.status == "READY"
         clips = session.query(Clip).order_by(Clip.start).all()
         assert [clip.status for clip in clips] == ["FAILED", "READY"]
-        assert clips[0].error_message == "Encoder unavailable"
+        assert clips[0].error_message == "Internal server error while generating the clip."
         assert Path(clips[1].output_path).is_file()
         ready_id = clips[1].id
     renderer.fail = False

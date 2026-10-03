@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..config import get_settings
 from ..db import get_db
+from ..errors import CLIENT_MESSAGES, processing_error, stored_failure
+from ..logging import log_stage
 from ..models import Clip, Moment, Project, Video
 from ..schemas import (
     ClipResponse,
@@ -44,7 +46,7 @@ def ingest(payload: IngestRequest, request: Request, session: Session = Depends(
         video_id = validate_youtube_url(payload.url.strip())
         source_url = canonical_youtube_url(payload.url.strip())
     except InvalidYouTubeURL as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=CLIENT_MESSAGES["INVALID_URL"]) from exc
     with _submission_lock:
         # Video IDs also match older projects whose URL was not canonicalized.
         project = session.query(Project).outerjoin(Video).filter(or_(
@@ -63,17 +65,21 @@ def ingest(payload: IngestRequest, request: Request, session: Session = Depends(
         runner = getattr(request.app.state, "pipeline_runner", None)
         if executor is None or runner is None:
             raise HTTPException(status_code=503, detail="The in-process pipeline is not configured")
+        created = project is None
         project = project or Project(source_url=source_url)
         project.status = "QUEUED"
         project.status_message = "Waiting for processing"
         project.error_message = None
         session.add(project)
         session.commit()
+        request.state.project_id = project.id
+        log_stage(project.id, "ingestion", "created" if created else "queued")
         try:
             executor.submit(runner, project.id)
-        except RuntimeError as exc:
+        except Exception as exc:
             project.status = "FAILED"
-            project.error_message = "Processing is unavailable; try again"
+            project.error_message = processing_error("ingestion").message
+            project.status_message = project.error_message
             session.commit()
             raise HTTPException(status_code=503, detail=project.error_message) from exc
         return IngestResponse(project_id=project.id, status="queued")
@@ -95,7 +101,11 @@ def get_project(project_id: str, session: Session = Depends(get_db)) -> ProjectR
 @router.get("/projects/{project_id}/status", response_model=StatusResponse)
 def get_status(project_id: str, session: Session = Depends(get_db)) -> StatusResponse:
     project = _project_or_404(project_id, session)
-    return StatusResponse(project_id=project.id, status=project.status, message=project.status_message, error=project.error_message)
+    response = StatusResponse(project_id=project.id, status=project.status, message=project.status_message)
+    if project.status == "FAILED" or project.error_message:
+        response.failed_stage, response.error = stored_failure(project.error_message)
+        response.message = response.error.message
+    return response
 
 
 @router.get("/projects/{project_id}/transcript", response_model=TranscriptResponse)
@@ -133,7 +143,10 @@ def get_clips(project_id: str, request: Request, session: Session = Depends(get_
             if not _media_path(project_id, clip.output_path, "clips"):
                 # Keep GETs read-only, but do not advertise an unplayable file.
                 response.status = "FAILED"
-                response.error_message = "Clip file is missing; retry clip generation"
+                response.failed_stage = "media"
+                response.error = processing_error("media")
+                response.error_message = response.error.message
+                response.media_url = response.download_url = None
         responses.append(response)
     return ClipsResponse(project_id=project_id, clips=responses)
 
@@ -182,13 +195,15 @@ def create_clip(
         project.error_message = None
         session.flush()
         session.commit()
+        request.state.clip_id = clip.id
+        log_stage(project_id, "rendering", "queued", clip.id)
         try:
             executor.submit(runner, project_id, clip.id)
-        except RuntimeError as exc:
+        except Exception as exc:
             clip.status = "FAILED"
-            clip.error_message = "Clip processing is unavailable; try again"
+            clip.error_message = processing_error("rendering").message
             project.status = "READY"
-            project.status_message = "Clip processing is unavailable; try again"
+            project.status_message = clip.error_message
             session.commit()
             raise HTTPException(status_code=503, detail=project.status_message) from exc
         return _clip_response(clip, request)

@@ -33,7 +33,7 @@ def _clean_words(words: Any) -> list[dict[str, Any]] | None:
         return None
     result = []
     for word in words:
-        text = str(_value(word, "word", "")).strip()
+        text = str(_value(word, "word", _value(word, "text", ""))).strip()
         start, end = _value(word, "start"), _value(word, "end")
         if not text or start is None or end is None:
             continue
@@ -42,7 +42,16 @@ def _clean_words(words: Any) -> list[dict[str, Any]] | None:
         except (TypeError, ValueError):
             continue
         if math.isfinite(start) and math.isfinite(end) and end >= start:
-            result.append({"word": text, "start": start, "end": end})
+            item = {"word": text, "start": start, "end": end}
+            confidence = _value(word, "confidence")
+            if confidence is not None:
+                try:
+                    confidence = float(confidence)
+                except (TypeError, ValueError):
+                    confidence = None
+                if confidence is not None and math.isfinite(confidence):
+                    item["confidence"] = confidence
+            result.append(item)
     return result or None
 
 

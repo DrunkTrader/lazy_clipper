@@ -1,6 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError,
   GeneratedClip,
   JsonObject,
   Moment,
@@ -17,11 +16,12 @@ import {
   getNumber,
   getProject,
   getProjects,
-  getProjectStatus,
   getMoments,
   getString,
   getTranscript,
 } from './api'
+import { errorMessage, publicError, stageMessages } from './errors'
+import { watchProject } from './projectUpdates'
 import './styles.css'
 
 type Selection = { id?: string; start: number; end?: number; label: string } | null
@@ -57,7 +57,8 @@ function normalizeMoments(value: unknown): Moment[] {
 }
 
 function statusName(status: ProjectStatus | null): string {
-  return (getString(status?.status) ?? 'UNKNOWN').toUpperCase()
+  const name = (getString(status?.status) ?? 'UNKNOWN').toUpperCase()
+  return ['QUEUED', 'INGESTING', 'TRANSCRIBING', 'ANALYZING', 'RENDERING', 'READY', 'COMPLETED', 'DONE', 'FAILED', 'ERROR', 'CANCELLED'].includes(name) ? name : 'UNKNOWN'
 }
 
 function isReady(status: string): boolean {
@@ -66,10 +67,6 @@ function isReady(status: string): boolean {
 
 function isFailed(status: string): boolean {
   return ['FAILED', 'ERROR', 'CANCELLED'].includes(status)
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'The request failed.'
 }
 
 function App() {
@@ -91,6 +88,7 @@ function App() {
   const [savedProjectsError, setSavedProjectsError] = useState<string | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
   const [projectError, setProjectError] = useState<string | null>(null)
+  const [statusError, setStatusError] = useState<string | null>(null)
   const [contentError, setContentError] = useState<string | null>(null)
   const [projectLoading, setProjectLoading] = useState(false)
   const [contentLoading, setContentLoading] = useState(false)
@@ -126,90 +124,54 @@ function App() {
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
-    let firstLoad = true
-    let timer: number | undefined
-
-    const loadProject = async () => {
-      if (firstLoad) setProjectLoading(true)
-      try {
-        const [nextProject, nextStatus] = await Promise.all([getProject(projectId), getProjectStatus(projectId)])
-        if (cancelled) return
-        setProject(nextProject)
+    setProjectLoading(true)
+    setClipsLoading(true)
+    setContentLoading(true)
+    const stop = watchProject(projectId, {
+      onStatus: (nextStatus) => {
         setStatus(nextStatus)
-        setProjectError(null)
-      } catch (error) {
-        if (!cancelled) setProjectError(errorMessage(error))
-      } finally {
-        if (!cancelled) {
-          firstLoad = false
-          setProjectLoading(false)
-          timer = window.setTimeout(() => void loadProject(), 4000)
-        }
-      }
-    }
-
-    void loadProject()
+        setStatusError(null)
+      },
+      onError: (error) => setStatusError(errorMessage(error)),
+      onRefresh: async () => {
+        await Promise.all([
+          getProject(projectId).then((nextProject) => {
+            if (cancelled) return
+            setProject(nextProject)
+            setProjectError(null)
+          }).catch((error) => {
+            if (!cancelled) setProjectError(errorMessage(error))
+          }).finally(() => {
+            if (!cancelled) setProjectLoading(false)
+          }),
+          Promise.all([getTranscript(projectId), getMoments(projectId)]).then(([nextTranscript, nextMoments]) => {
+            if (cancelled) return
+            setTranscript(normalizeTranscript(nextTranscript))
+            setMoments(normalizeMoments(nextMoments))
+            setContentError(null)
+          }).catch((error) => {
+            if (!cancelled) setContentError(errorMessage(error))
+          }).finally(() => {
+            if (!cancelled) setContentLoading(false)
+          }),
+          getClips(projectId).then((response) => {
+            if (cancelled) return
+            setClips(response.clips)
+            setClipsLoaded(true)
+            setClipsError(null)
+          }).catch((error) => {
+            if (!cancelled) setClipsError(errorMessage(error))
+          }).finally(() => {
+            if (!cancelled) setClipsLoading(false)
+          }),
+        ])
+      },
+    })
     return () => {
       cancelled = true
-      window.clearTimeout(timer)
+      stop()
     }
   }, [projectId, refreshVersion])
-
-  useEffect(() => {
-    if (!projectId || !(isReady(currentStatus) || currentStatus === 'RENDERING' || isFailed(currentStatus))) return
-    let cancelled = false
-    setContentLoading(true)
-    setContentError(null)
-
-    Promise.all([getTranscript(projectId), getMoments(projectId)])
-      .then(([transcriptResponse, momentsResponse]) => {
-        if (cancelled) return
-        setTranscript(normalizeTranscript(transcriptResponse))
-        setMoments(normalizeMoments(momentsResponse))
-      })
-      .catch((error) => {
-        if (!cancelled) setContentError(errorMessage(error))
-      })
-      .finally(() => {
-        if (!cancelled) setContentLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [projectId, currentStatus])
-
-  useEffect(() => {
-    if (!projectId) return
-    let cancelled = false
-    let timer: number | undefined
-    setClipsLoading(true)
-
-    const loadClips = async () => {
-      try {
-        const response = await getClips(projectId)
-        if (cancelled) return
-        setClips(response.clips)
-        setClipsLoaded(true)
-        setClipsError(null)
-      } catch (error) {
-        if (!cancelled) setClipsError(errorMessage(error))
-      } finally {
-        if (!cancelled) {
-          setClipsLoading(false)
-          if (currentStatus === 'RENDERING') {
-            timer = window.setTimeout(() => void loadClips(), 4000)
-          }
-        }
-      }
-    }
-
-    void loadClips()
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [projectId, currentStatus, refreshVersion])
 
   const clipsByMoment = useMemo(() => new Map(clips.map((clip) => [clip.moment_id, clip])), [clips])
   const failed = isFailed(currentStatus)
@@ -217,8 +179,10 @@ function App() {
   const title = getString(project?.title) ?? getString(asRecord(project?.video).title) ?? 'Untitled project'
   const sourceUrl = getString(project?.source_url) ?? getString(project?.url)
   const statusMessage = failed
-    ? (getString(status?.error) ?? getString(status?.message))
-    : (getString(status?.message) ?? getString(status?.error))
+    ? publicError(status)
+    : ({ QUEUED: 'Waiting for processing.', INGESTING: 'Fetching and preparing the video.',
+      TRANSCRIBING: 'Generating the timestamped transcript.', ANALYZING: 'Finding and ranking candidate moments.',
+      RENDERING: 'Rendering the selected clip.' } as Record<string, string>)[currentStatus]
 
   const sortedTranscript = useMemo(
     () => [...transcript].sort((a, b) => (a.start ?? 0) - (b.start ?? 0)),
@@ -247,6 +211,7 @@ function App() {
     setCreating(true)
     setCreateError(null)
     setProjectError(null)
+    setStatusError(null)
     setContentError(null)
     try {
       const response = await createProject(trimmedUrl)
@@ -354,7 +319,7 @@ function App() {
       {projectId && (
         <section className="workspace">
           {projectLoading && !project && <div className="panel loading-state">Loading project…</div>}
-          {projectError && <div className="alert error-box" role="alert"><strong>Could not load project.</strong> {projectError}</div>}
+          {(projectError || statusError) && <div className="alert error-box" role="alert"><strong>Could not load project.</strong> {projectError ?? statusError}</div>}
 
           {project && (
             <>
@@ -525,7 +490,7 @@ function MomentClip({ clip, loading, unavailable, title, canCreate, creating, on
         </>}
       </div>
     </div>
-    {clip.error_message && <p className="error-text" role="alert">{clip.error_message}</p>}
+    {(clip.status === 'FAILED' || clip.error_message) && <p className="error-text" role="alert">{publicError(clip, 'rendering')}</p>}
     {ready && !clip.media_url && <p className="muted">Preview unavailable: no media URL was returned.</p>}
     {ready && !clip.download_url && <p className="muted">Download unavailable: no download URL was returned.</p>}
     {ready && clip.media_url && previewOpen && <div className="clip-preview" id={previewId}>
@@ -538,7 +503,7 @@ function MomentClip({ clip, loading, unavailable, title, canCreate, creating, on
         aria-label={`Clip preview: ${title}`}
         onError={() => setPreviewError(true)}
       />
-      {previewError && <p className="error-text" role="alert">Could not play this clip. Try reopening the preview or downloading the file.</p>}
+      {previewError && <p className="error-text" role="alert">{stageMessages.media}</p>}
     </div>}
   </div>
 }
@@ -615,7 +580,7 @@ function YoutubePlayer({ videoId, selection, playerRef }: {
       })
       playerRef.current = player
     }).catch((error: unknown) => {
-      if (!cancelled) setPlayerError(errorMessage(error))
+      if (!cancelled) setPlayerError(errorMessage(error, 'media'))
     })
 
     return () => {

@@ -11,8 +11,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d lazy_clipper"]
-      interval: 5s
+      interval: 3m
       timeout: 5s
+      start_period: 30s
+      start_interval: 5s
       retries: 10
 
   api:
@@ -33,16 +35,16 @@ services:
       YTDLP_JS_RUNTIME: ${YTDLP_JS_RUNTIME:-node}
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
-      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
       TRANSCRIPT_CHUNK_SECONDS: ${TRANSCRIPT_CHUNK_SECONDS:-300}
       TRANSCRIPT_OVERLAP_SECONDS: ${TRANSCRIPT_OVERLAP_SECONDS:-45}
       MAX_MOMENTS: ${MAX_MOMENTS:-10}
     init: true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"]
-      interval: 10s
+      interval: 3m
       timeout: 5s
       start_period: 30s
+      start_interval: 5s
       retries: 6
     ports:
       - "8000:8000"

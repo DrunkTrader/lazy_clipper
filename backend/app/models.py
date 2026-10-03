@@ -24,6 +24,8 @@ class Project(Base):
     title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED", index=True)
     status_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # New failures store only a public stage message; diagnostics belong in logs.
+    # API serialization also sanitizes legacy rows containing raw exceptions.
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
@@ -99,6 +101,7 @@ class Clip(Base):
     end: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
     output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Public-only message, using the same contract as project failures.
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="clips")

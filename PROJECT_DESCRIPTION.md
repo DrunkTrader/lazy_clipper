@@ -115,7 +115,7 @@ The frontend must never silently fall back to fake/demo project data when a real
               │               │
               │      ┌────────┼──────────┐
               │      ↓        ↓          ↓
-              │    yt-dlp   WhisperX   FFmpeg
+              │    yt-dlp   whisper-timestamped   FFmpeg
               │
               └──────────────┐
                              ↓
@@ -431,9 +431,9 @@ FFmpeg should be treated as a system-level dependency and wrapped behind a small
 
 # 11. Transcription
 
-## WhisperX
+## whisper-timestamped
 
-Use WhisperX for timestamped transcription.
+Use `whisper-timestamped` for full-video transcription with word-level timestamps.
 
 Pipeline:
 
@@ -444,7 +444,7 @@ FFmpeg
       ↓
 audio.wav
       ↓
-WhisperX
+whisper-timestamped
       ↓
 timestamped transcript
 ```
@@ -505,7 +505,7 @@ Where available, preserve word timestamps:
 Raw transcription output should pass through a normalization stage before AI analysis.
 
 ```text
-Raw WhisperX
+Raw whisper-timestamped
     ↓
 Remove invalid/empty segments
     ↓
@@ -1348,8 +1348,8 @@ FFmpeg
 ## Transcription
 
 ```text
-WhisperX
-faster-whisper
+whisper-timestamped
+openai-whisper
 PyTorch
 ```
 
@@ -1495,7 +1495,7 @@ The complete product should implement:
               │                │
               │              Audio
               │                │
-              │            WhisperX
+              │            whisper-timestamped
               │                │
               │          Transcript
               │                │
@@ -1604,8 +1604,8 @@ Video:
     FFmpeg
 
 Transcription:
-    WhisperX
-    faster-whisper
+    whisper-timestamped
+    openai-whisper
     PyTorch
 
 AI:
