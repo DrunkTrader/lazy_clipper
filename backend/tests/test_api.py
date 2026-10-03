@@ -104,7 +104,7 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
         clip = Clip(project_id=project.id, moment_id=moment.id, start=0, end=2, status="READY", output_path=str(output))
         session.add(clip)
         session.commit()
-        project_id, clip_id = project.id, clip.id
+        project_id, clip_id, moment_id = project.id, clip.id, moment.id
 
     base = f"/api/v1/projects/{project_id}"
     before = api_client.get(base).json()["updated_at"]
@@ -131,8 +131,33 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
     from backend.app.main import app
 
     submitted = []
-    monkeypatch.setattr(app.state.pipeline_executor, "submit", lambda runner, project_id: submitted.append((runner, project_id)))
-    assert api_client.post(base + "/clips").status_code == 202
-    assert api_client.post(base + "/clips").status_code == 409
-    assert submitted == [(app.state.clip_runner, project_id)]
+    monkeypatch.setattr(app.state.pipeline_executor, "submit", lambda runner, project_id, clip_id: submitted.append((runner, project_id, clip_id)))
+    request = {"moment_id": moment_id, "start": 0, "end": 2}
+    queued = api_client.post(base + "/clips", json=request)
+    assert queued.status_code == 202
+    assert queued.json()["status"] == "QUEUED"
+    assert api_client.post(base + "/clips", json=request).status_code == 409
+    assert submitted == [(app.state.clip_runner, project_id, clip_id)]
     assert api_client.get(base + "/status").json()["status"] == "RENDERING"
+
+
+def test_source_video_is_not_served(api_client):
+    from backend.app.config import get_settings
+    from backend.app.db import session_factory
+    from backend.app.models import Project, Video
+
+    with session_factory()() as session:
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ", status="READY")
+        session.add(project)
+        session.flush()
+        source = get_settings().project_storage(project.id) / "source" / "video.mp4"
+        source.write_bytes(b"source-video")
+        session.add(Video(project_id=project.id, youtube_id="dQw4w9WgXcQ", source_path=str(source)))
+        session.commit()
+        project_id = project.id
+
+    response = api_client.get(f"/api/v1/projects/{project_id}")
+    assert response.status_code == 200
+    assert response.json()["video"]["youtube_id"] == "dQw4w9WgXcQ"
+    assert response.json()["video"]["media_url"] is None
+    assert api_client.get(f"/api/v1/projects/{project_id}/media").status_code == 404

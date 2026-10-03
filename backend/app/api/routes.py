@@ -2,7 +2,6 @@
 from concurrent.futures import Executor
 from pathlib import Path
 from threading import Lock
-import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
@@ -15,6 +14,7 @@ from ..models import Clip, Moment, Project, Video
 from ..schemas import (
     ClipResponse,
     ClipsResponse,
+    CreateClipRequest,
     IngestRequest,
     IngestResponse,
     MomentResponse,
@@ -85,24 +85,11 @@ def list_projects(session: Session = Depends(get_db)) -> list[Project]:
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
-def get_project(project_id: str, request: Request, session: Session = Depends(get_db)) -> ProjectResponse:
+def get_project(project_id: str, session: Session = Depends(get_db)) -> ProjectResponse:
     project = _project_or_404(project_id, session)
-    response = ProjectResponse.model_validate(project)
-    if response.video is not None and _media_path(project_id, project.video.source_path, "source"):
-        response.video.media_url = str(request.base_url).rstrip("/") + f"/api/v1/projects/{project_id}/media"
-    return response
-
-
-@router.get("/projects/{project_id}/media")
-def get_media(project_id: str, session: Session = Depends(get_db)) -> FileResponse:
-    project = _project_or_404(project_id, session)
-    if project.video is None or not project.video.source_path:
-        raise HTTPException(status_code=404, detail="Source video is not available")
-    source_path = _media_path(project_id, project.video.source_path, "source")
-    if source_path is None:
-        raise HTTPException(status_code=404, detail="Source video file is not available")
-    media_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
-    return FileResponse(source_path, media_type=media_type, filename=source_path.name, content_disposition_type="inline")
+    # The downloaded source is backend-only for transcription and rendering.
+    # Frontend playback uses the YouTube IFrame Player API with youtube_id.
+    return ProjectResponse.model_validate(project)
 
 
 @router.get("/projects/{project_id}/status", response_model=StatusResponse)
@@ -141,12 +128,9 @@ def get_clips(project_id: str, request: Request, session: Session = Depends(get_
     clips = session.query(Clip).join(Moment).filter(Clip.project_id == project_id).order_by(Moment.rank).all()
     responses = []
     for clip in clips:
-        response = ClipResponse.model_validate(clip)
+        response = _clip_response(clip, request)
         if clip.status == "READY":
-            if _media_path(project_id, clip.output_path, "clips"):
-                response.media_url = str(request.base_url).rstrip("/") + f"/api/v1/projects/{project_id}/clips/{clip.id}/media"
-                response.download_url = response.media_url + "?download=true"
-            else:
+            if not _media_path(project_id, clip.output_path, "clips"):
                 # Keep GETs read-only, but do not advertise an unplayable file.
                 response.status = "FAILED"
                 response.error_message = "Clip file is missing; retry clip generation"
@@ -154,32 +138,68 @@ def get_clips(project_id: str, request: Request, session: Session = Depends(get_
     return ClipsResponse(project_id=project_id, clips=responses)
 
 
-@router.post("/projects/{project_id}/clips", response_model=IngestResponse, status_code=status.HTTP_202_ACCEPTED)
-def generate_clips(project_id: str, request: Request, session: Session = Depends(get_db)) -> IngestResponse:
+@router.post("/projects/{project_id}/clips", response_model=ClipResponse, status_code=status.HTTP_202_ACCEPTED)
+def create_clip(
+    project_id: str,
+    payload: CreateClipRequest,
+    request: Request,
+    session: Session = Depends(get_db),
+) -> ClipResponse:
     with _submission_lock:
         project = _project_or_404(project_id, session)
-        if project.status not in {"READY", "FAILED"}:
+        if project.status == "RENDERING":
             raise HTTPException(status_code=409, detail="Project processing is already in progress")
-        if not project.moments:
-            raise HTTPException(status_code=409, detail="No saved moments are available to render")
+        if project.status not in {"READY", "FAILED"}:
+            raise HTTPException(status_code=409, detail="Project analysis is not complete")
+        moment = session.query(Moment).filter_by(id=payload.moment_id, project_id=project_id).one_or_none()
+        if moment is None:
+            raise HTTPException(status_code=404, detail="Moment not found in this project")
         if project.video is None or _media_path(project_id, project.video.source_path, "source") is None:
             raise HTTPException(status_code=409, detail="The downloaded source video is missing")
+        if project.video.duration is not None and payload.end > project.video.duration + 0.1:
+            raise HTTPException(status_code=422, detail="Clip timestamps exceed the source video duration")
         executor = getattr(request.app.state, "pipeline_executor", None)
         runner = getattr(request.app.state, "clip_runner", None)
         if executor is None or runner is None:
             raise HTTPException(status_code=503, detail="Clip processing is unavailable")
+        clip = session.query(Clip).filter_by(project_id=project_id, moment_id=moment.id).one_or_none()
+        if clip is not None and clip.status in {"QUEUED", "RENDERING"}:
+            raise HTTPException(status_code=409, detail="This clip is already being rendered")
+        if clip is not None and clip.status == "READY" and _media_path(project_id, clip.output_path, "clips") and (
+            clip.start == payload.start and clip.end == payload.end
+        ):
+            return _clip_response(clip, request)
+        if clip is None:
+            clip = Clip(project_id=project_id, moment_id=moment.id)
+            session.add(clip)
+        clip.start = payload.start
+        clip.end = payload.end
+        clip.status = "QUEUED"
+        clip.output_path = None
+        clip.error_message = None
         project.status = "RENDERING"
-        project.status_message = "Waiting to render vertical clips"
+        project.status_message = "Waiting to render selected clip"
         project.error_message = None
+        session.flush()
         session.commit()
         try:
-            executor.submit(runner, project_id)
+            executor.submit(runner, project_id, clip.id)
         except RuntimeError as exc:
+            clip.status = "FAILED"
+            clip.error_message = "Clip processing is unavailable; try again"
             project.status = "READY"
             project.status_message = "Clip processing is unavailable; try again"
             session.commit()
             raise HTTPException(status_code=503, detail=project.status_message) from exc
-        return IngestResponse(project_id=project_id, status="rendering")
+        return _clip_response(clip, request)
+
+
+def _clip_response(clip: Clip, request: Request) -> ClipResponse:
+    response = ClipResponse.model_validate(clip)
+    if clip.status == "READY":
+        response.media_url = str(request.base_url).rstrip("/") + f"/api/v1/projects/{clip.project_id}/clips/{clip.id}/media"
+        response.download_url = response.media_url + "?download=true"
+    return response
 
 
 @router.get("/projects/{project_id}/clips/{clip_id}/media")
