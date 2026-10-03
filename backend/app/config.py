@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     ytdlp_cookie_file: Path | None = None
     whisper_model: str = "small"
     whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
     transcript_chunk_seconds: float = Field(default=300.0, gt=0)
     transcript_overlap_seconds: float = Field(default=45.0, ge=0)
     max_moments: int = Field(default=10, ge=1, le=100)

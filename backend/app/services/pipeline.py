@@ -9,9 +9,12 @@ from ..analysis.moments import calculate_composite_score
 from ..analysis.transcript import chunk_segments, normalize_segments
 from ..config import Settings, get_settings
 from ..db import session_factory
+from ..errors import Stage, failure_stage, processing_error
+from ..logging import log_failure, log_stage
 from ..models import Clip, Moment, Project, TranscriptSegment, Video
+from .captions import select_words, write_ass
 from .media import MediaService
-from .transcription import WhisperXTranscriber
+from .transcription import WhisperTimestampedTranscriber
 from .youtube import YoutubeService
 
 
@@ -27,16 +30,17 @@ class Pipeline:
         *,
         youtube: YoutubeService | None = None,
         media: MediaService | None = None,
-        transcriber: WhisperXTranscriber | None = None,
+        transcriber: WhisperTimestampedTranscriber | None = None,
         analyzer=None,
         make_session: Callable[[], Session] | None = None,
     ):
         self.settings = settings or get_settings()
         self.youtube = youtube or YoutubeService(self.settings)
         self.media = media or MediaService(self.settings)
-        self.transcriber = transcriber or WhisperXTranscriber(self.settings)
+        self.transcriber = transcriber or WhisperTimestampedTranscriber(self.settings)
         self.analyzer = analyzer
-        self.make_session = make_session or session_factory()
+        # Defer session/engine setup so worker failures reach the logged boundary.
+        self.make_session = make_session or (lambda: session_factory()())
 
     @staticmethod
     def _status(session: Session, project: Project, status: str, message: str) -> None:
@@ -47,8 +51,10 @@ class Pipeline:
         session.commit()
 
     def run(self, project_id: str) -> None:
-        session = self.make_session()
+        session = None
+        stage: Stage = "ingestion"
         try:
+            session = self.make_session()
             project = session.get(Project, project_id)
             if project is None or project.status == "READY":
                 return
@@ -56,6 +62,8 @@ class Pipeline:
             video = project.video
             source_path = existing_file(video.source_path) if video else None
             if source_path is None:
+                stage = "fetching"
+                log_stage(project_id, stage, "started")
                 self._status(session, project, "INGESTING", "Reading video metadata")
                 metadata = self.youtube.get_metadata(project.source_url)
                 video = video or Video(project_id=project.id)
@@ -68,9 +76,13 @@ class Pipeline:
                 session.add(video)
                 session.commit()
 
+                log_stage(project_id, stage, "completed")
+                stage = "ingestion"
+                log_stage(project_id, stage, "started")
                 source_path = self.youtube.download_video(project.source_url, root / "source")
                 video.source_path = str(source_path)
                 session.commit()
+                log_stage(project_id, stage, "completed")
 
             # Reopening/retrying a project uses its database rows and persisted
             # files. Only an absent stage calls the expensive external service.
@@ -82,10 +94,15 @@ class Pipeline:
             if not normalized:
                 audio_path = existing_file(video.audio_path)
                 if audio_path is None:
+                    stage = "ingestion"
+                    log_stage(project_id, stage, "started")
                     audio_path = self.media.extract_audio(source_path, root / "audio" / "audio.wav")
                     video.audio_path = str(audio_path)
                     session.commit()
+                    log_stage(project_id, stage, "completed")
 
+                stage = "transcription"
+                log_stage(project_id, stage, "started")
                 self._status(session, project, "TRANSCRIBING", "Generating timestamped transcript")
                 normalized = normalize_segments(self.transcriber.transcribe(audio_path))
                 if not normalized:
@@ -102,8 +119,11 @@ class Pipeline:
                     ))
                 (root / "transcript" / "transcript.json").write_text(json.dumps(normalized, indent=2), encoding="utf-8")
                 session.commit()
+                log_stage(project_id, stage, "completed")
 
             if not project.moments:
+                stage = "analysis"
+                log_stage(project_id, stage, "started")
                 self._status(session, project, "ANALYZING", "Finding and ranking candidate moments")
                 chunks = chunk_segments(
                     normalized,
@@ -128,11 +148,14 @@ class Pipeline:
                         dimensions=candidate.scores.model_dump(),
                     ))
                 session.commit()
+                log_stage(project_id, stage, "completed")
             self._status(session, project, "READY", f"Analysis complete: {len(project.moments)} moments ready for clipping")
+            log_stage(project_id, "pipeline", "ready")
         except Exception as exc:
-            self._fail(session, project_id, exc)
+            self._fail(session, project_id, exc, stage)
         finally:
-            session.close()
+            if session is not None:
+                session.close()
 
     def _render_clips(self, session: Session, project: Project) -> None:
         """Render all saved moments for an explicit legacy/backfill call.
@@ -157,20 +180,22 @@ class Pipeline:
             clip.error_message = None
             clip.output_path = None
             self._status(session, project, "RENDERING", f"Rendering vertical clip {index} of {len(clips)}")
+            log_stage(project.id, "rendering", "started", clip.id)
+            project_id, clip_id = project.id, clip.id
             try:
                 if source_path is None:
                     raise RuntimeError("Source video file is missing; clip cannot be rendered")
                 duration = project.video.duration
                 if duration is not None and (clip.start >= duration or clip.end > duration + 0.1):
                     raise ValueError("Clip timestamps exceed the source video duration")
-                output = self.media.render_clip(source_path, root / "clips" / f"{clip.id}.mp4", clip.start, clip.end)
+                output = self._render_clip_media(project, clip, source_path, root)
                 clip.output_path = str(output)
                 clip.status = "READY"
+                session.commit()
+                log_stage(project.id, "rendering", "completed", clip.id)
             except Exception as exc:
                 # A bad range or encoder failure must not discard other clips.
-                clip.status = "FAILED"
-                clip.error_message = str(exc)[-4000:]
-            session.commit()
+                self._fail_clip(session, project_id, clip_id, exc)
 
         failed = sum(clip.status == "FAILED" for clip in clips.values())
         message = f"Processing complete: {len(clips) - failed} clips ready"
@@ -180,7 +205,9 @@ class Pipeline:
 
     def render_clip(self, project_id: str, clip_id: str) -> None:
         """Render one persisted clip request using the downloaded source."""
-        with self.make_session() as session:
+        session = None
+        try:
+            session = self.make_session()
             project = session.get(Project, project_id)
             clip = session.get(Clip, clip_id)
             if project is None or clip is None or clip.project_id != project_id:
@@ -197,42 +224,92 @@ class Pipeline:
             project.status_message = "Rendering selected vertical clip"
             project.error_message = None
             session.commit()
-            try:
-                if source_path is None:
-                    raise RuntimeError("Source video file is missing; clip cannot be rendered")
-                duration = project.video.duration if project.video else None
-                if duration is not None and (clip.start >= duration or clip.end > duration + 0.1):
-                    raise ValueError("Clip timestamps exceed the source video duration")
-                output = self.media.render_clip(source_path, root / "clips" / f"{clip.id}.mp4", clip.start, clip.end)
-                clip.output_path = str(output)
-                clip.status = "READY"
-                project.status_message = "Selected clip is ready"
-            except Exception as exc:
-                clip.status = "FAILED"
-                clip.error_message = str(exc)[-4000:]
-                project.status_message = "Selected clip rendering failed; retry the clip"
+            log_stage(project_id, "rendering", "started", clip_id)
+            if source_path is None:
+                raise RuntimeError("Source video file is missing; clip cannot be rendered")
+            duration = project.video.duration if project.video else None
+            if duration is not None and (clip.start >= duration or clip.end > duration + 0.1):
+                raise ValueError("Clip timestamps exceed the source video duration")
+            output = self._render_clip_media(project, clip, source_path, root)
+            clip.output_path = str(output)
+            clip.status = "READY"
+            project.status_message = "Selected clip is ready"
             project.status = "READY"
             session.commit()
+            log_stage(project_id, "rendering", "completed", clip_id)
+        except Exception as exc:
+            self._fail_clip(session, project_id, clip_id, exc)
+        finally:
+            if session is not None:
+                session.close()
+
+    def _render_clip_media(self, project: Project, clip: Clip, source_path: Path, root: Path) -> Path:
+        """Render one user-selected range using only persisted word timestamps."""
+        words = select_words(project.transcript_segments, clip.start, clip.end)
+        subtitle_path = root / "clips" / f"{clip.id}.ass"
+        try:
+            write_ass(subtitle_path, words, clip.start, clip.end)
+            return self.media.render_clip(
+                source_path,
+                root / "clips" / f"{clip.id}.mp4",
+                clip.start,
+                clip.end,
+                subtitle_path=subtitle_path,
+            )
+        finally:
+            subtitle_path.unlink(missing_ok=True)
 
     @staticmethod
-    def _fail(session: Session, project_id: str, exc: Exception) -> None:
-        session.rollback()
-        project = session.get(Project, project_id)
-        if project is not None:
-            project.status = "FAILED"
-            project.status_message = "Processing failed"
-            project.error_message = str(exc)[-4000:]
-            session.commit()
+    def _fail(session: Session | None, project_id: str, exc: Exception, stage: Stage = "unknown") -> None:
+        stage = failure_stage(exc, stage)
+        log_failure(exc, project_id=project_id, stage=stage)
+        if session is None:
+            return
+        try:
+            session.rollback()
+            project = session.get(Project, project_id)
+            if project is not None:
+                project.status = "FAILED"
+                project.status_message = processing_error(stage).message
+                project.error_message = project.status_message
+                session.commit()
+        except Exception as persist_exc:
+            log_failure(persist_exc, project_id=project_id, stage="database", context="PERSIST_FAILURE")
+
+    @staticmethod
+    def _fail_clip(session: Session | None, project_id: str, clip_id: str, exc: Exception) -> None:
+        stage = failure_stage(exc, "rendering")
+        log_failure(exc, project_id=project_id, clip_id=clip_id, stage=stage)
+        if session is None:
+            return
+        try:
+            session.rollback()
+            clip = session.get(Clip, clip_id)
+            project = session.get(Project, project_id)
+            if clip is not None and clip.project_id == project_id:
+                clip.status = "FAILED"
+                clip.output_path = None
+                clip.error_message = processing_error(stage).message
+                if project is not None:
+                    project.status = "READY"
+                    project.status_message = "Selected clip rendering failed; retry the clip"
+                session.commit()
+        except Exception as persist_exc:
+            log_failure(persist_exc, project_id=project_id, clip_id=clip_id, stage="database", context="PERSIST_FAILURE")
 
     def render_clips(self, project_id: str) -> None:
         """Explicit backfill/retry for saved moments, never ingest or analyze."""
-        with self.make_session() as session:
-            try:
-                project = session.get(Project, project_id)
-                if project is not None:
-                    self._render_clips(session, project)
-            except Exception as exc:
-                self._fail(session, project_id, exc)
+        session = None
+        try:
+            session = self.make_session()
+            project = session.get(Project, project_id)
+            if project is not None:
+                self._render_clips(session, project)
+        except Exception as exc:
+            self._fail(session, project_id, exc, "rendering")
+        finally:
+            if session is not None:
+                session.close()
 
 
 def run_pipeline(project_id: str) -> None:

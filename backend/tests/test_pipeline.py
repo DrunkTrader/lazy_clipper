@@ -26,8 +26,9 @@ class FakeMedia:
         audio_path.write_bytes(b"audio")
         return audio_path
 
-    def render_clip(self, source_path, output_path, start, end):
+    def render_clip(self, source_path, output_path, start, end, *, subtitle_path=None):
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        assert subtitle_path is not None and subtitle_path.is_file()
         output_path.write_bytes(b"unit-test clip")
         return output_path
 
@@ -40,8 +41,23 @@ class FailingMedia(FakeMedia):
 class FakeTranscriber:
     def transcribe(self, audio_path):
         return [
-            {"start": 0, "end": 4, "text": "Here is a useful standalone idea."},
-            {"start": 5, "end": 8, "text": "It has a clear payoff for viewers."},
+            {"start": 0, "end": 4, "text": "Here is a useful standalone idea.", "words": [
+                {"text": "Here", "start": 0, "end": 0.5},
+                {"text": "is", "start": 0.5, "end": 1},
+                {"text": "a", "start": 1, "end": 1.2},
+                {"text": "useful", "start": 1.2, "end": 2},
+                {"text": "standalone", "start": 2, "end": 3},
+                {"text": "idea.", "start": 3, "end": 4},
+            ]},
+            {"start": 5, "end": 8, "text": "It has a clear payoff for viewers.", "words": [
+                {"text": "It", "start": 5, "end": 5.3},
+                {"text": "has", "start": 5.3, "end": 5.7},
+                {"text": "a", "start": 5.7, "end": 5.9},
+                {"text": "clear", "start": 5.9, "end": 6.4},
+                {"text": "payoff", "start": 6.4, "end": 7.2},
+                {"text": "for", "start": 7.2, "end": 7.5},
+                {"text": "viewers.", "start": 7.5, "end": 8},
+            ]},
         ]
 
 
@@ -97,6 +113,7 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
         project = session.get(Project, project_id)
         assert project.status == "READY"
         assert len(project.transcript_segments) == 2
+        assert project.transcript_segments[0].words[0]["word"] == "Here"
         assert len(project.moments) == 1
         assert project.moments[0].score > 0
         assert project.clips == []
@@ -109,6 +126,7 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
         session.commit()
         clip_id = clip.id
     Pipeline(settings, media=FakeMedia(), make_session=sessions).render_clip(project_id, clip_id)
+    assert not list((settings.project_storage(project_id) / "clips").glob("*.ass"))
     with sessions() as session:
         clip = session.get(Clip, clip_id)
         assert clip.status == "READY"
@@ -162,7 +180,7 @@ def test_pipeline_fails_when_normalization_removes_all_transcript_data(tmp_path)
     with sessions() as session:
         project = session.get(Project, project_id)
         assert project.status == "FAILED"
-        assert project.error_message == "Transcript normalization produced no valid segments"
+        assert project.error_message == "Internal server error during transcription."
 
 
 def test_pipeline_keeps_metadata_when_media_fails(tmp_path):

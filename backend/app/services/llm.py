@@ -87,7 +87,9 @@ class LLMClient:
                 return parsed
             except Exception as exc:
                 last_error = exc
-        raise LLMResponseError(f"{stage} response was not valid JSON/schema after one correction: {last_error}") from last_error
+        # The chained validation error retains diagnostics without copying
+        # model/user payloads into the wrapper's exception message.
+        raise LLMResponseError(f"{stage} response was not valid JSON/schema after one correction") from last_error
 
     def detect(self, segments: list[dict[str, Any]]) -> DetectionResponse:
         transcript = _format_segments(segments)

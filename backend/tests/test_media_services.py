@@ -7,7 +7,7 @@ import pytest
 
 from backend.app.config import Settings
 from backend.app.services.media import FFmpegError, MediaService
-from backend.app.services.transcription import TranscriptionError, WhisperXTranscriber
+from backend.app.services.transcription import TranscriptionError, WhisperTimestampedTranscriber
 from backend.app.services.youtube import (
     InvalidYouTubeURL,
     MediaDependencyError,
@@ -130,50 +130,51 @@ def test_youtube_download_only_returns_complete_mp4_and_cleans_failure(monkeypat
     assert not list(destination.glob("video.*"))
 
 
-def test_whisperx_uses_silero_and_preserves_timestamps(monkeypatch, tmp_path):
+def test_whisper_timestamped_preserves_word_timestamps(monkeypatch, tmp_path):
     calls = {}
 
-    class FakeModel:
-        def transcribe(self, audio, **options):
-            calls["transcribe"] = options
-            return {"segments": [{"start": 1.25, "end": 2.5, "text": "hello", "words": [{"word": "hello"}]}]}
+    def fake_transcribe(model, audio, **options):
+        calls["transcribe"] = options
+        return {
+            "segments": [{
+                "start": 1.25,
+                "end": 2.5,
+                "text": "hello",
+                "words": [{"text": "hello", "start": 1.25, "end": 2.5, "confidence": 0.9}],
+            }],
+        }
 
-    fake_whisperx = types.SimpleNamespace(
-        load_model=lambda *args, **options: (calls.setdefault("load", (args, options)) and FakeModel()),
-        load_audio=lambda path: path,
+    fake_whisper = types.SimpleNamespace(
+        load_model=lambda *args, **options: calls.setdefault("load", (args, options)) and object(),
+        transcribe=fake_transcribe,
     )
-    monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
+    monkeypatch.setitem(sys.modules, "whisper_timestamped", fake_whisper)
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"wav")
-    segments = WhisperXTranscriber(Settings()).transcribe(audio_path)
+    segments = WhisperTimestampedTranscriber(Settings()).transcribe(audio_path)
     assert segments[0]["start"] == 1.25
-    assert segments[0]["words"] == [{"word": "hello"}]
-    assert calls["load"][1]["vad_method"] == "silero"
-    assert calls["load"][1]["threads"] == 2
-    assert calls["transcribe"]["batch_size"] == 1
-    assert calls["transcribe"]["num_workers"] == 0
+    assert segments[0]["words"][0]["text"] == "hello"
+    assert calls["transcribe"]["compute_word_confidence"] is True
+    assert calls["transcribe"]["vad"] is False
+    assert calls["transcribe"]["fp16"] is False
 
 
-def test_whisperx_requires_real_audio(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "whisperx", types.SimpleNamespace())
+def test_whisper_timestamped_requires_real_audio(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "whisper_timestamped", types.SimpleNamespace())
     with pytest.raises(TranscriptionError, match="missing or empty"):
-        WhisperXTranscriber(Settings()).transcribe(tmp_path / "missing.wav")
+        WhisperTimestampedTranscriber(Settings()).transcribe(tmp_path / "missing.wav")
 
 
-def test_whisperx_rejects_empty_transcript(monkeypatch, tmp_path):
-    class EmptyModel:
-        def transcribe(self, audio, **options):
-            return {"segments": []}
-
-    fake_whisperx = types.SimpleNamespace(
-        load_model=lambda *args, **options: EmptyModel(),
-        load_audio=lambda path: path,
+def test_whisper_timestamped_rejects_empty_transcript(monkeypatch, tmp_path):
+    fake_whisper = types.SimpleNamespace(
+        load_model=lambda *args, **options: object(),
+        transcribe=lambda *args, **options: {"segments": []},
     )
-    monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
+    monkeypatch.setitem(sys.modules, "whisper_timestamped", fake_whisper)
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"wav")
     with pytest.raises(TranscriptionError, match="no transcript segments"):
-        WhisperXTranscriber(Settings()).transcribe(audio_path)
+        WhisperTimestampedTranscriber(Settings()).transcribe(audio_path)
 
 
 def test_ffmpeg_is_noninteractive_bounded_and_removes_stale_output(monkeypatch, tmp_path):

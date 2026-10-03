@@ -1,6 +1,8 @@
+import { ApiError, FailureFields, FailureStage } from './errors'
+
 export type JsonObject = Record<string, unknown>
 
-export type Project = JsonObject & {
+export type Project = JsonObject & FailureFields & {
   project_id?: string
   id?: string
   title?: string
@@ -10,10 +12,9 @@ export type Project = JsonObject & {
   updated_at?: string
 }
 
-export type ProjectStatus = JsonObject & {
+export type ProjectStatus = JsonObject & FailureFields & {
   status?: string
   message?: string
-  error?: string
 }
 
 export type TranscriptSegment = JsonObject & {
@@ -36,7 +37,7 @@ export type Moment = JsonObject & {
 
 export type ClipStatus = 'QUEUED' | 'RENDERING' | 'READY' | 'FAILED'
 
-export type GeneratedClip = {
+export type GeneratedClip = FailureFields & {
   id: string
   project_id: string
   moment_id: string
@@ -53,88 +54,73 @@ export type ClipsResponse = {
   clips: GeneratedClip[]
 }
 
-export class ApiError extends Error {
-  readonly status: number
-
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
-
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000').replace(/\/$/, '')
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response
+async function request<T>(path: string, stage: FailureStage, init?: RequestInit): Promise<T> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30000)
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
+      signal: controller.signal,
       headers: {
         Accept: 'application/json',
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
         ...init?.headers,
       },
     })
-  } catch {
-    throw new ApiError(`Could not reach the API at ${API_BASE_URL}.`, 0)
-  }
-
-  const body = await response.text()
-  let parsed: unknown = undefined
-  if (body) {
+    const body = await response.text()
+    let parsed: unknown
     try {
       parsed = JSON.parse(body)
     } catch {
       parsed = undefined
     }
+    if (!response.ok || parsed === undefined) {
+      throw new ApiError(response.ok ? 500 : response.status, parsed, stage)
+    }
+    return parsed as T
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    throw new ApiError(0, null, stage)
+  } finally {
+    clearTimeout(timeout)
   }
-
-  if (!response.ok) {
-    const detail =
-      typeof parsed === 'object' && parsed !== null
-        ? (parsed as JsonObject).detail ?? (parsed as JsonObject).message
-        : undefined
-    const message = typeof detail === 'string' ? detail : `API request failed (${response.status}).`
-    throw new ApiError(message, response.status)
-  }
-
-  return parsed as T
 }
 
 export function createProject(url: string): Promise<JsonObject> {
-  return request<JsonObject>('/api/v1/ingest', {
+  return request<JsonObject>('/api/v1/ingest', 'ingestion', {
     method: 'POST',
     body: JSON.stringify({ url }),
   })
 }
 
 export function getProjects(): Promise<Project[]> {
-  return request<Project[]>('/api/v1/projects')
+  return request<Project[]>('/api/v1/projects', 'database')
 }
 
 export function getProject(projectId: string): Promise<Project> {
-  return request<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}`)
+  return request<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}`, 'database')
 }
 
 export function getProjectStatus(projectId: string): Promise<ProjectStatus> {
-  return request<ProjectStatus>(`/api/v1/projects/${encodeURIComponent(projectId)}/status`)
+  return request<ProjectStatus>(`/api/v1/projects/${encodeURIComponent(projectId)}/status`, 'database')
 }
 
 export function getTranscript(projectId: string): Promise<unknown> {
-  return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/transcript`)
+  return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/transcript`, 'database')
 }
 
 export function getMoments(projectId: string): Promise<unknown> {
-  return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`)
+  return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`, 'database')
 }
 
 export function getClips(projectId: string): Promise<ClipsResponse> {
-  return request<ClipsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`)
+  return request<ClipsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, 'media')
 }
 
 export function createClip(projectId: string, payload: { moment_id: string; start: number; end: number }): Promise<GeneratedClip> {
-  return request<GeneratedClip>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, {
+  return request<GeneratedClip>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, 'rendering', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
