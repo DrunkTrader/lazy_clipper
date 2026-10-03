@@ -1,27 +1,36 @@
 # LazyClipper MVP
 
-LazyClipper turns a long-form YouTube video into timestamped clip candidates:
+LazyClipper turns a long-form YouTube video into timestamped clip candidates and captioned vertical clips. Paste a video URL, let the app find moments worth keeping, then render only the clips you choose.
 
-```text
-YouTube URL
-  → project
-  → yt-dlp metadata and video
-  → FFmpeg audio
-  → word-timestamped Whisper transcript
-  → transcript normalization and chunking
-  → OpenAI-compatible LLM analysis
-  → validation, scoring, and deduplication
-  → persisted moments
-  → YouTube IFrame playback
-  → user-requested FFmpeg 1080×1920 clip
-  → minimal React workspace with preview/download
-```
+For component boundaries, data flow, persistence, runtime topology, and detailed processing workflows, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+![LazyClipper workspace showing a processed project, suggested moments, transcript, and generated clip](assets/img_lazy.png)
 
 The backend keeps the downloaded source for word-timestamped Whisper/LLM processing, but the frontend plays the original through YouTube's IFrame Player API. A suggested moment only becomes a deterministic center-cropped 9:16 MP4 (H.264 video, AAC audio) with burned-in word captions after the user clicks **Create Clip**. Advanced editing, intelligent reframing, publishing, and social integrations remain out of scope.
 
 Full-video transcription persists segment and word timestamps once. Clip creation selects the stored words overlapping the requested range, writes a temporary ASS subtitle file, and burns it into only that requested clip; it never transcribes the clip again or renders captions for the original video.
 
 There are no demo or static-data fallbacks. If ingestion, audio extraction, transcription, or LLM analysis fails, the project is persisted as `FAILED` with a safe stage-specific message. Technical exception diagnostics stay in redacted backend logs. Individual clip-render failures are stored on the clip; other clips continue, and the project remains usable.
+
+## What you can do
+
+- Submit a YouTube URL and create a reusable project.
+- Inspect the original video through YouTube, alongside its transcript and AI-ranked moments.
+- Jump to a suggested moment before deciding whether to create a clip.
+- Render a selected moment as a center-cropped 1080×1920 MP4 with burned-in word captions.
+- Preview or download completed clips, and retry individual failed renders without rerunning analysis.
+
+### Start a project
+
+The workspace begins with a focused URL entry point and keeps saved projects available for later inspection.
+
+![LazyClipper project creation and project header](assets/img_lazy_1.png)
+
+### Review moments and transcript
+
+When processing completes, suggested moments appear beside the timestamped transcript. Selecting a moment seeks the YouTube player; creating a clip is always an explicit action.
+
+![LazyClipper suggested moments and transcript](assets/img_lazy_2.png)
 
 ## Requirements
 
@@ -30,7 +39,7 @@ There are no demo or static-data fallbacks. If ingestion, audio extraction, tran
 - An OpenAI-compatible LLM gateway, such as FreeLLMAPI
 - An API key and model configured in that gateway
 
-The application uses `yt-dlp`, `yt-dlp-ejs`, Node.js, FFmpeg with libass subtitle support, `whisper-timestamped`, PostgreSQL, SQLAlchemy, FastAPI, React, and Vite. Processing currently runs in a small in-process thread pool; PostgreSQL stores the project state and generated results.
+The application uses `yt-dlp`, `yt-dlp-ejs`, Node.js, FFmpeg with libass subtitle support, `whisper-timestamped`, PostgreSQL, SQLAlchemy, FastAPI, React, and Vite.
 
 The backend image installs the pinned Python packages `yt-dlp==2026.8.19` and `yt-dlp-ejs==0.8.0` from `pyproject.toml`; it does not depend on `/usr/bin/yt-dlp` or a host-installed yt-dlp. Node.js 22.23.3 is included in the image and is used by `yt-dlp-ejs` for modern YouTube JavaScript challenge solving.
 
@@ -233,50 +242,11 @@ The clip POST accepts `moment_id`, `start`, and `end`, persists one queued clip,
 
 Clip statuses are `QUEUED`, `RENDERING`, `READY`, and `FAILED`. A failed clip includes the same `failed_stage`/`error` contract plus the safe, backward-compatible `error_message` field.
 
-## Word captions and current-word highlighting
+## Captioned clips
 
-Generated clips use **custom Python-generated ASS (Advanced SubStation Alpha) subtitles**, rendered by **FFmpeg's `subtitles` filter using libass**. The responsibilities are:
+Full-video transcription stores word-level timing once. When a clip is requested, the renderer selects the stored words in that range, creates temporary ASS subtitles, and burns them into the MP4 with FFmpeg's libass-backed `subtitles` filter. The active word is amber and surrounding words are white in a sliding four-word window.
 
-| Component | Responsibility | Implementation |
-| --- | --- | --- |
-| `whisper-timestamped` | Transcribes the full source audio and supplies each word's start/end timestamps | `backend/app/services/transcription.py` |
-| Custom Python caption generator | Selects stored words, builds timed subtitle events, and styles the active word | `backend/app/services/captions.py` |
-| FFmpeg with libass | Renders the ASS text and styling into the clip's video frames | `backend/app/services/media.py` |
-| Clip pipeline | Creates the temporary subtitle file, invokes rendering, and removes the subtitle file afterward | `Pipeline._render_clip_media()` in `backend/app/services/pipeline.py` |
-
-### How the highlight follows speech
-
-1. Full-video transcription saves word timestamps in each transcript segment's `words` data.
-2. `select_words()` selects words overlapping the requested clip and clamps their timestamps to its boundaries.
-3. `build_ass()` subtracts the clip's start time and creates one ASS dialogue event per word, active from that word's start to its end. ASS timestamps are written with centisecond precision.
-4. Each event shows a sliding window of up to **four words**. The current word is **gold/amber (`#FFBF00`)** and the surrounding words are **white (`#FFFFFF`)**. The highlight changes at word boundaries rather than progressively filling each word.
-5. FFmpeg burns the captions into the exported MP4. Preview and download therefore show the same captions; their timing and styling are part of the video itself.
-
-The active-word color is assigned in `build_ass()`:
-
-```python
-color = "{\\c&H0000BFFF&}" if displayed_index == index else "{\\c&H00FFFFFF&}"
-```
-
-ASS color notation uses blue-green-red ordering, so `0000BFFF` represents amber. Edit this expression to change the highlight colors, or `build_ass()`'s `window_size` default to change how many words are displayed. Edit `ASS_HEADER` in the same file for font, size, background, and placement. The current style requests bold Arial at size 80 on a 1080×1920 subtitle canvas, bottom-centered with a dark box; the installed fonts determine any font substitution.
-
-Caption styling is applied when a clip is rendered. Existing MP4s retain their original styling until rerendered. Clip creation reuses persisted word timings and does not run transcription again. Temporary `clips/<clip_id>.ass` files are removed after each render attempt.
-
-### Caption dependencies and checks
-
-`whisper-timestamped` is the Python transcription dependency (`pip install -e '.[transcription]'` for local development). Caption-file generation uses Python's standard library. libass is a native dependency of the FFmpeg subtitle filter, provided by the FFmpeg package in the backend image. A local FFmpeg installation must also include that filter:
-
-```bash
-ffmpeg -hide_banner -h filter=subtitles
-# Check the container's FFmpeg instead:
-docker compose exec api ffmpeg -hide_banner -h filter=subtitles
-```
-
-These commands should show the `subtitles` filter help rather than an unknown-filter error. Focused caption checks cover word selection, clip-relative timing, highlight tags, temporary subtitle cleanup, and real captioned MP4 rendering when FFmpeg/ffprobe are installed:
-
-```bash
-pytest -q backend/tests/test_captions.py backend/tests/test_pipeline.py backend/tests/test_clipping.py
-```
+Caption styling belongs to the rendered video, so existing MP4s need to be rerendered after a style change. Clip creation reuses persisted word timings and never retranscribes the selected range. See [ARCHITECTURE.md](ARCHITECTURE.md#caption-generation-and-highlighting) for the implementation details and native subtitle checks.
 
 ## Local development without Compose
 
