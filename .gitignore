@@ -11,5 +11,5 @@ frontend/node_modules/
 frontend/dist/
 *.egg-info/
 __agent__/
-CODEBASE_IMPLEMNTATION_PLAND.md
+CODEBASE_IMPLEMNTATION_PLAN.md
 PROJECT_DESCRIPTION.md
