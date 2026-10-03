@@ -12,11 +12,12 @@ YouTube URL
   → OpenAI-compatible LLM analysis
   → validation, scoring, and deduplication
   → persisted moments
-  → FFmpeg 1080×1920 clips
+  → YouTube IFrame playback
+  → user-requested FFmpeg 1080×1920 clip
   → minimal React workspace with preview/download
 ```
 
-Each suggested moment produces a deterministic center-cropped 9:16 MP4 (H.264 video, AAC audio). Advanced editing, intelligent reframing, publishing, captions, and social integrations remain out of scope.
+The backend keeps the downloaded source for WhisperX/LLM processing, but the frontend plays the original through YouTube's IFrame Player API. A suggested moment only becomes a deterministic center-cropped 9:16 MP4 (H.264 video, AAC audio) after the user clicks **Create Clip**. Advanced editing, intelligent reframing, publishing, captions, and social integrations remain out of scope.
 
 There are no demo or static-data fallbacks. If ingestion, audio extraction, transcription, or LLM analysis fails, the project is persisted as `FAILED` with the actual error. Individual clip-render failures are stored on the clip; other clips continue, and the project remains usable.
 
@@ -108,7 +109,7 @@ Build behavior:
 
 - **Backend:** dependencies are installed from `pyproject.toml` in a cached build stage before application source is copied. Editing Python code does not reinstall WhisperX/PyTorch. BuildKit also caches pip downloads; build tools are excluded from the runtime image.
 - **Frontend:** `npm ci` installs the checked-in lockfile during the image build, followed by the TypeScript/Vite build. Nginx serves the compiled assets; startup no longer runs npm or depends on host `node_modules`.
-- **API access:** by default the frontend proxies `/api/` to the API container, including video playback and downloads. This works with the hostname used to open the frontend, not a hard-coded browser-side `localhost:8000`. Set `VITE_API_BASE_URL` only when using a separate API origin, then rebuild the frontend; Vite embeds this value at build time.
+- **API access:** by default the frontend proxies `/api/` to the API container, including generated clip playback and downloads. This works with the hostname used to open the frontend, not a hard-coded browser-side `localhost:8000`. Set `VITE_API_BASE_URL` only when using a separate API origin, then rebuild the frontend; Vite embeds this value at build time.
 
 The first build still downloads the large transcription dependencies. Subsequent builds reuse them unless `pyproject.toml` or the base image changes. Do not use `--no-cache` for normal updates; it deliberately discards these image-layer savings. Model downloads are reused separately through the existing `whisper_cache` volume.
 
@@ -126,11 +127,11 @@ Open:
 - API documentation: <http://localhost:8000/docs>
 - Health check: <http://localhost:8000/health>
 
-Paste a YouTube URL and click **Create project**. The frontend polls the project through ingestion, transcription, analysis, and clip rendering. Suggested moments show clip status, **Preview**, and **Download**. Preview plays the generated vertical MP4; **Seek video** still seeks in the original source.
+Paste a YouTube URL and click **Create project**. The frontend polls the project through ingestion, transcription, and analysis. Suggested moments control the YouTube player with **Jump to moment**. **Create Clip** sends that moment's timestamps to the API; the backend renders only the requested vertical MP4 and the workspace then shows its processing state, **Preview**, and **Download**.
 
 The `?project_id=...` URL and **Saved projects** links reopen database-backed projects using GET requests only. Submitting the same YouTube video reuses its existing project rather than creating a duplicate. Explicitly resubmitting a failed project retries missing pipeline stages while retaining its downloaded source, audio, transcript, and moments. If a completed project's source file was deleted, an explicit submission restores it while preserving saved analysis; refreshing never redownloads it.
 
-For projects created before clip rendering was added, open the saved project and click **Generate clips**. **Retry failed clips** rerenders missing/failed outputs without downloading, transcribing, analyzing, or replacing successful clips. Refresh never automatically starts either operation.
+Each moment has its own **Create Clip** action. **Retry Clip** rerenders a failed or missing output without downloading, transcribing, analyzing, or replacing successful clips. Refresh never automatically starts clip rendering.
 
 The first backend image build installs WhisperX and may take several minutes. It also installs the pinned yt-dlp packages, Node.js, and FFmpeg inside the image. The first transcription downloads the configured Whisper model and VAD assets. Media and transcript files are stored under:
 
@@ -184,14 +185,16 @@ curl http://localhost:8000/api/v1/projects/PROJECT_ID/moments
 The project status moves through:
 
 ```text
-QUEUED → INGESTING → TRANSCRIBING → ANALYZING → RENDERING → READY
+QUEUED → INGESTING → TRANSCRIBING → ANALYZING → READY
 ```
 
-Any stage can end in:
+Ingestion and analysis can end in:
 
 ```text
 FAILED
 ```
+
+After analysis is `READY`, an individual clip request temporarily uses `RENDERING` while FFmpeg creates that selected clip, then returns the project to `READY`.
 
 The failure response includes a human-readable error. Empty or invalid WhisperX output is treated as a failure rather than as a successful project with fake transcript data.
 
@@ -199,16 +202,15 @@ Other available endpoints include:
 
 ```text
 GET /api/v1/projects
-GET  /api/v1/projects/{project_id}/media
 GET  /api/v1/projects/{project_id}/clips
 POST /api/v1/projects/{project_id}/clips
 GET  /api/v1/projects/{project_id}/clips/{clip_id}/media
 GET  /api/v1/projects/{project_id}/clips/{clip_id}/media?download=true
 ```
 
-The source media endpoint serves the downloaded video referenced by the database. The frontend uses it for browser playback and timestamp seeking. Clip media is served only from the requested project's clips directory, with byte-range support for playback and an attachment response for downloads. JSON responses expose URLs, not filesystem paths.
+The downloaded source video is never served to the frontend. The project response exposes the YouTube video ID for IFrame playback. Generated clip media is served only from the requested project's clips directory, with byte-range support for playback and an attachment response for downloads. JSON responses expose clip URLs, not filesystem paths.
 
-The bodyless clip POST explicitly queues rendering of saved moments through the existing thread pool. It skips valid `READY` outputs, retries failed/missing ones, and rejects submissions while a project is already processing. All GET routes are read-only.
+The clip POST accepts `moment_id`, `start`, and `end`, persists one queued clip, and submits only that clip to the existing thread pool. It reuses a valid `READY` output and can retry a failed/missing output. All GET routes are read-only.
 
 Clip statuses are `QUEUED`, `RENDERING`, `READY`, and `FAILED`. A failed clip includes a human-readable `error_message`.
 

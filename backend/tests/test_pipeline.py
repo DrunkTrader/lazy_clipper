@@ -3,7 +3,7 @@ from pathlib import Path
 from backend.app.analysis.moments import CandidateMoment, CandidateScores
 from backend.app.config import Settings
 from backend.app.db import Base, get_engine, init_db, session_factory
-from backend.app.models import Project
+from backend.app.models import Clip, Project
 from backend.app.services.pipeline import Pipeline
 
 
@@ -99,10 +99,21 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
         assert len(project.transcript_segments) == 2
         assert len(project.moments) == 1
         assert project.moments[0].score > 0
-        assert len(project.clips) == 1
-        assert project.clips[0].status == "READY"
-        assert project.clips[0].moment_id == project.moments[0].id
-        assert Path(project.clips[0].output_path).is_file()
+        assert project.clips == []
+        moment_id = project.moments[0].id
+
+    # Clip rendering is an explicit user action, not part of ingestion.
+    with sessions() as session:
+        clip = Clip(project_id=project_id, moment_id=moment_id, start=0, end=8)
+        session.add(clip)
+        session.commit()
+        clip_id = clip.id
+    Pipeline(settings, media=FakeMedia(), make_session=sessions).render_clip(project_id, clip_id)
+    with sessions() as session:
+        clip = session.get(Clip, clip_id)
+        assert clip.status == "READY"
+        assert clip.moment_id == moment_id
+        assert Path(clip.output_path).is_file()
 
     class UnexpectedCall:
         def __getattr__(self, name):
@@ -113,7 +124,6 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
     with sessions() as session:
         project = session.get(Project, project_id)
         project.status = "FAILED"
-        clip_id = project.clips[0].id
         source_mtime = Path(project.video.source_path).stat().st_mtime_ns
         session.commit()
     unused = UnexpectedCall()

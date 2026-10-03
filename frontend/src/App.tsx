@@ -8,11 +8,11 @@ import {
   ProjectStatus,
   TranscriptSegment,
   asRecord,
+  createClip,
   createProject,
   extractItems,
   extractProjectId,
   formatTime,
-  generateClips,
   getClips,
   getNumber,
   getProject,
@@ -24,7 +24,7 @@ import {
 } from './api'
 import './styles.css'
 
-type Selection = { start: number; end?: number; label: string } | null
+type Selection = { id?: string; start: number; end?: number; label: string } | null
 
 function readTime(item: JsonObject, names: string[]): number | undefined {
   for (const name of names) {
@@ -68,20 +68,6 @@ function isFailed(status: string): boolean {
   return ['FAILED', 'ERROR', 'CANCELLED'].includes(status)
 }
 
-function getMediaUrl(project: Project | null): string | undefined {
-  if (!project) return undefined
-  const video = asRecord(project.video)
-  return (
-    getString(project.video_url) ??
-    getString(project.media_url) ??
-    getString(project.playback_url) ??
-    getString(project.video_path_url) ??
-    getString(video.url) ??
-    getString(video.video_url) ??
-    getString(video.media_url)
-  )
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'The request failed.'
 }
@@ -97,8 +83,8 @@ function App() {
   const [clipsLoading, setClipsLoading] = useState(true)
   const [clipsLoaded, setClipsLoaded] = useState(false)
   const [clipsError, setClipsError] = useState<string | null>(null)
-  const [generatingClips, setGeneratingClips] = useState(false)
-  const [generationError, setGenerationError] = useState<string | null>(null)
+  const [creatingClipId, setCreatingClipId] = useState<string | null>(null)
+  const [clipCreationError, setClipCreationError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
   const [savedProjects, setSavedProjects] = useState<Project[]>([])
   const [savedProjectsLoading, setSavedProjectsLoading] = useState(true)
@@ -110,7 +96,7 @@ function App() {
   const [contentLoading, setContentLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [selected, setSelected] = useState<Selection>(null)
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const youtubePlayerRef = useRef<YouTubePlayer | null>(null)
   const activeProjectId = useRef(projectId)
   const currentStatus = statusName(status)
 
@@ -226,12 +212,8 @@ function App() {
   }, [projectId, currentStatus, refreshVersion])
 
   const clipsByMoment = useMemo(() => new Map(clips.map((clip) => [clip.moment_id, clip])), [clips])
-  const hasMissingClips = moments.some((moment) => moment.id && !clipsByMoment.has(moment.id))
-  const hasFailedClips = moments.some((moment) => moment.id && clipsByMoment.get(moment.id)?.status === 'FAILED')
-  const canGenerateClips = isReady(currentStatus) && clipsLoaded && !clipsLoading && !clipsError
-    && !contentLoading && !contentError && (hasMissingClips || hasFailedClips)
   const failed = isFailed(currentStatus)
-  const mediaUrl = getMediaUrl(project)
+  const youtubeId = getString(asRecord(project?.video).youtube_id)
   const title = getString(project?.title) ?? getString(asRecord(project?.video).title) ?? 'Untitled project'
   const sourceUrl = getString(project?.source_url) ?? getString(project?.url)
   const statusMessage = failed
@@ -243,14 +225,9 @@ function App() {
     [transcript],
   )
 
-  function seekTo(start: number | undefined, end: number | undefined, label: string) {
+  function seekTo(start: number | undefined, end: number | undefined, label: string, id?: string) {
     if (start === undefined) return
-    setSelected({ start, end, label })
-    const video = videoRef.current
-    if (video) {
-      video.currentTime = start
-      void video.play().catch(() => undefined)
-    }
+    setSelected({ id, start, end, label })
   }
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
@@ -283,8 +260,8 @@ function App() {
       setClipsLoading(true)
       setClipsLoaded(false)
       setClipsError(null)
-      setGeneratingClips(false)
-      setGenerationError(null)
+      setCreatingClipId(null)
+      setClipCreationError(null)
       setSelected(null)
       setProjectId(newProjectId)
       setRefreshVersion((version) => version + 1)
@@ -296,20 +273,25 @@ function App() {
     }
   }
 
-  async function handleGenerateClips() {
-    if (!canGenerateClips || generatingClips) return
+  async function handleCreateClip(moment: Moment) {
+    const momentId = getString(moment.id)
+    const start = moment.start
+    const end = moment.end
+    if (!momentId || start === undefined || end === undefined || creatingClipId) return
     const requestedProjectId = projectId
-    setGeneratingClips(true)
-    setGenerationError(null)
+    setSelected({ id: momentId, start, end, label: moment.title ?? 'Moment' })
+    setCreatingClipId(momentId)
+    setClipCreationError(null)
     try {
-      const response = await generateClips(requestedProjectId)
+      const clip = await createClip(requestedProjectId, { moment_id: momentId, start, end })
       if (activeProjectId.current !== requestedProjectId) return
-      setStatus({ status: response.status, message: 'Generating clips from saved moments.' })
+      setClips((current) => [...current.filter((item) => item.id !== clip.id && item.moment_id !== clip.moment_id), clip])
+      setStatus({ status: 'RENDERING', message: 'Rendering the selected clip.' })
     } catch (error) {
-      if (activeProjectId.current === requestedProjectId) setGenerationError(errorMessage(error))
+      if (activeProjectId.current === requestedProjectId) setClipCreationError(errorMessage(error))
     } finally {
       if (activeProjectId.current === requestedProjectId) {
-        setGeneratingClips(false)
+        setCreatingClipId(null)
         // Read the persisted state after success or a conflict; never retry a POST automatically.
         setRefreshVersion((version) => version + 1)
       }
@@ -412,12 +394,12 @@ function App() {
 
               <section className="video-section panel">
                 <div className="section-heading"><div><p className="eyebrow">SOURCE VIDEO</p><h2>Preview</h2></div>{selected && <span className="selection-label">Selected: {selected.label}</span>}</div>
-                {mediaUrl ? (
-                  <video ref={videoRef} className="video-player" controls preload="metadata" src={mediaUrl} />
+                {youtubeId ? (
+                  <YoutubePlayer videoId={youtubeId} selection={selected} playerRef={youtubePlayerRef} />
                 ) : (
                   <div className="empty-state video-unavailable">
-                    <strong>No playable media URL was returned by the API.</strong>
-                    <span>Metadata, transcript, and moments are still shown below. The player will appear when the backend provides a video URL.</span>
+                    <strong>No YouTube video ID was returned by the API.</strong>
+                    <span>Metadata, transcript, and moments are still shown below. The player will appear when the project has YouTube metadata.</span>
                   </div>
                 )}
               </section>
@@ -433,33 +415,33 @@ function App() {
                     <p className="error-text" role="alert">Could not load generated clips: {clipsError}</p>
                     <button type="button" className="text-button" disabled={clipsLoading} onClick={() => setRefreshVersion((version) => version + 1)}>Reload clip status</button>
                   </div>}
-                  {(canGenerateClips || generatingClips) && <div className="clip-generation">
-                    <p className="muted">Generate missing clips and retry failures. Existing ready clips are kept.</p>
-                    <button type="button" className="text-button" onClick={() => void handleGenerateClips()} disabled={generatingClips}>
-                      {generatingClips ? 'Requesting clips…' : hasFailedClips ? 'Retry failed clips' : 'Generate clips'}
-                    </button>
-                  </div>}
-                  {generationError && <p className="error-text clip-generation-error" role="alert">Could not generate clips: {generationError}</p>}
-                  <div className="moment-list">
+                   {clipCreationError && <p className="error-text clip-generation-error" role="alert">Could not create clip: {clipCreationError}</p>}
+                   <div className="moment-list">
                     {moments.map((moment, index) => {
                       const start = moment.start
                       const end = moment.end
                       const key = getString(moment.id) ?? `${start ?? index}-${index}`
-                      return <article className={`moment-card ${selected?.label === (moment.title ?? '') ? 'selected' : ''}`} key={key}>
+                       const clip = moment.id ? clipsByMoment.get(moment.id) : undefined
+                       const canCreateClip = !!moment.id && start !== undefined && end !== undefined
+                         && clipsLoaded && !clipsLoading && !clipsError && (isReady(currentStatus) || isFailed(currentStatus))
+                       return <article className={`moment-card ${selected?.id === moment.id || (!selected?.id && selected?.label === (moment.title ?? '')) ? 'selected' : ''}`} key={key}>
                         <div className="moment-topline"><span className="moment-number">{String(index + 1).padStart(2, '0')}</span><span className="time-range">{formatTime(start)} – {formatTime(end)}</span></div>
                         <h3>{moment.title}</h3>
                         {moment.description && <p>{moment.description}</p>}
                         {moment.reason && <p className="reason"><strong>Why it stands out:</strong> {moment.reason}</p>}
                         <div className="moment-footer">
                           {moment.score !== undefined && <span className="score">Score {moment.score}</span>}
-                          <button className="text-button" onClick={() => seekTo(start, end, moment.title ?? 'Moment')} disabled={start === undefined}>Seek video →</button>
+                           <button className="text-button" onClick={() => seekTo(start, end, moment.title ?? 'Moment', moment.id)} disabled={start === undefined}>Jump to moment →</button>
                         </div>
                         <MomentClip
-                          clip={moment.id ? clipsByMoment.get(moment.id) : undefined}
-                          loading={clipsLoading}
-                          unavailable={!!clipsError || !clipsLoaded}
-                          title={moment.title ?? 'Moment'}
-                        />
+                           clip={clip}
+                           loading={clipsLoading}
+                           unavailable={!!clipsError || !clipsLoaded}
+                           title={moment.title ?? 'Moment'}
+                           canCreate={canCreateClip}
+                           creating={creatingClipId === moment.id}
+                           onCreate={() => void handleCreateClip(moment)}
+                         />
                       </article>
                     })}
                   </div>
@@ -492,11 +474,14 @@ function App() {
   )
 }
 
-function MomentClip({ clip, loading, unavailable, title }: {
+function MomentClip({ clip, loading, unavailable, title, canCreate, creating, onCreate }: {
   clip?: GeneratedClip
   loading: boolean
   unavailable: boolean
   title: string
+  canCreate: boolean
+  creating: boolean
+  onCreate: () => void
 }) {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewError, setPreviewError] = useState(false)
@@ -507,15 +492,25 @@ function MomentClip({ clip, loading, unavailable, title }: {
   }, [clip?.id, clip?.media_url])
 
   if (!clip) {
-    return <div className="moment-clip"><p className="muted">{loading ? 'Loading clip…' : unavailable ? 'Clip status unavailable.' : 'Clip not generated yet.'}</p></div>
+    return <div className="moment-clip">
+      <div className="clip-heading">
+        <p className="muted">{loading ? 'Loading clip status…' : unavailable ? 'Clip status unavailable.' : 'No clip created yet.'}</p>
+        <button type="button" className="clip-button" onClick={onCreate} disabled={!canCreate || creating}>
+          {creating ? 'Requesting…' : 'Create Clip'}
+        </button>
+      </div>
+    </div>
   }
 
   const ready = clip.status === 'READY'
+  const canRetry = clip.status === 'FAILED' && canCreate
   const previewId = `clip-preview-${clip.id}`
   return <div className="moment-clip">
     <div className="clip-heading">
       <span className={`clip-status ${ready ? 'ready' : clip.status === 'FAILED' ? 'failed' : ''}`} role="status">Clip: {clip.status}</span>
-      {ready && <div className="clip-actions">
+      <div className="clip-actions">
+        {canRetry && <button type="button" className="clip-button" onClick={onCreate} disabled={creating}>{creating ? 'Requesting…' : 'Retry Clip'}</button>}
+        {ready && <>
         {clip.media_url && <button
           type="button"
           className="text-button"
@@ -527,7 +522,8 @@ function MomentClip({ clip, loading, unavailable, title }: {
           }}
         >{previewOpen ? 'Close preview' : 'Preview'}</button>}
         {clip.download_url && <a className="text-button" href={clip.download_url} download>Download</a>}
-      </div>}
+        </>}
+      </div>
     </div>
     {clip.error_message && <p className="error-text" role="alert">{clip.error_message}</p>}
     {ready && !clip.media_url && <p className="muted">Preview unavailable: no media URL was returned.</p>}
@@ -544,6 +540,112 @@ function MomentClip({ clip, loading, unavailable, title }: {
       />
       {previewError && <p className="error-text" role="alert">Could not play this clip. Try reopening the preview or downloading the file.</p>}
     </div>}
+  </div>
+}
+
+type YouTubePlayer = {
+  seekTo: (seconds: number, allowSeekAhead?: boolean) => void
+  playVideo: () => void
+  pauseVideo: () => void
+  getCurrentTime?: () => number
+  destroy: () => void
+}
+
+type YouTubeApi = {
+  Player: new (element: HTMLElement, options: {
+    videoId: string
+    playerVars?: Record<string, number | string>
+    events?: { onReady?: () => void }
+  }) => YouTubePlayer
+}
+
+declare global {
+  interface Window {
+    YT?: YouTubeApi
+    onYouTubeIframeAPIReady?: () => void
+  }
+}
+
+let youtubeApiPromise: Promise<void> | null = null
+
+function loadYouTubeApi(): Promise<void> {
+  if (window.YT?.Player) return Promise.resolve()
+  if (youtubeApiPromise) return youtubeApiPromise
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    const previousReady = window.onYouTubeIframeAPIReady
+    window.onYouTubeIframeAPIReady = () => {
+      previousReady?.()
+      resolve()
+    }
+    const script = document.createElement('script')
+    script.src = 'https://www.youtube.com/iframe_api'
+    script.async = true
+    script.onerror = () => {
+      youtubeApiPromise = null
+      reject(new Error('Could not load the YouTube Player API.'))
+    }
+    document.head.appendChild(script)
+  })
+  return youtubeApiPromise
+}
+
+function YoutubePlayer({ videoId, selection, playerRef }: {
+  videoId: string
+  selection: Selection
+  playerRef: { current: YouTubePlayer | null }
+}) {
+  const hostRef = useRef<HTMLDivElement>(null)
+  const [ready, setReady] = useState(false)
+  const [playerError, setPlayerError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setReady(false)
+    setPlayerError(null)
+    playerRef.current = null
+
+    void loadYouTubeApi().then(() => {
+      if (cancelled || !hostRef.current || !window.YT?.Player) return
+      const player = new window.YT.Player(hostRef.current, {
+        videoId,
+        playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
+        events: { onReady: () => {
+          if (!cancelled) setReady(true)
+        } },
+      })
+      playerRef.current = player
+    }).catch((error: unknown) => {
+      if (!cancelled) setPlayerError(errorMessage(error))
+    })
+
+    return () => {
+      cancelled = true
+      playerRef.current?.destroy()
+      playerRef.current = null
+    }
+  }, [videoId, playerRef])
+
+  useEffect(() => {
+    const player = playerRef.current
+    if (!ready || !player || !selection) return
+    player.seekTo(selection.start, true)
+    player.playVideo()
+  }, [ready, selection, playerRef])
+
+  useEffect(() => {
+    const end = selection?.end
+    if (!ready || end === undefined) return
+    const timer = window.setInterval(() => {
+      const player = playerRef.current
+      const currentTime = player?.getCurrentTime?.()
+      if (player && currentTime !== undefined && currentTime >= end) player.pauseVideo()
+    }, 250)
+    return () => window.clearInterval(timer)
+  }, [ready, selection, playerRef])
+
+  return <div className="youtube-player-frame">
+    <div ref={hostRef} aria-label="YouTube source video" />
+    {playerError && <p className="error-text" role="alert">{playerError}</p>}
   </div>
 }
 

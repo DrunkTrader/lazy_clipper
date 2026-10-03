@@ -133,8 +133,11 @@ export function getClips(projectId: string): Promise<ClipsResponse> {
   return request<ClipsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`)
 }
 
-export function generateClips(projectId: string): Promise<{ project_id: string; status: 'rendering' }> {
-  return request(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, { method: 'POST' })
+export function createClip(projectId: string, payload: { moment_id: string; start: number; end: number }): Promise<GeneratedClip> {
+  return request<GeneratedClip>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 }
 
 export function asRecord(value: unknown): JsonObject {

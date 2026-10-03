@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class IngestRequest(BaseModel):
@@ -14,6 +14,18 @@ class IngestResponse(BaseModel):
     status: str
 
 
+class CreateClipRequest(BaseModel):
+    moment_id: str = Field(min_length=1, max_length=36)
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "CreateClipRequest":
+        if self.end <= self.start:
+            raise ValueError("Clip end must be greater than clip start")
+        return self
+
+
 class VideoResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -22,6 +34,8 @@ class VideoResponse(BaseModel):
     title: str | None = None
     duration: float | None = None
     thumbnail_url: str | None = None
+    # Kept as a null-compatible field for older clients. The downloaded source
+    # video is intentionally never exposed as a frontend media URL.
     media_url: str | None = None
 
 

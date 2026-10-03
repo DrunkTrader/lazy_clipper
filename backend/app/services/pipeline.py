@@ -128,13 +128,18 @@ class Pipeline:
                         dimensions=candidate.scores.model_dump(),
                     ))
                 session.commit()
-            self._render_clips(session, project)
+            self._status(session, project, "READY", f"Analysis complete: {len(project.moments)} moments ready for clipping")
         except Exception as exc:
             self._fail(session, project_id, exc)
         finally:
             session.close()
 
     def _render_clips(self, session: Session, project: Project) -> None:
+        """Render all saved moments for an explicit legacy/backfill call.
+
+        Normal ingestion never calls this method. New clip requests use
+        :meth:`render_clip` so selecting one moment only renders that moment.
+        """
         root = self.settings.project_storage(project.id)
         clips = {clip.moment_id: clip for clip in project.clips}
         for moment in project.moments:
@@ -173,6 +178,42 @@ class Pipeline:
             message += f", {failed} failed (retry clip generation to try again)"
         self._status(session, project, "READY", message)
 
+    def render_clip(self, project_id: str, clip_id: str) -> None:
+        """Render one persisted clip request using the downloaded source."""
+        with self.make_session() as session:
+            project = session.get(Project, project_id)
+            clip = session.get(Clip, clip_id)
+            if project is None or clip is None or clip.project_id != project_id:
+                return
+            if clip.status == "READY" and existing_file(clip.output_path):
+                return
+
+            root = self.settings.project_storage(project_id)
+            source_path = existing_file(project.video.source_path) if project.video else None
+            clip.status = "RENDERING"
+            clip.error_message = None
+            clip.output_path = None
+            project.status = "RENDERING"
+            project.status_message = "Rendering selected vertical clip"
+            project.error_message = None
+            session.commit()
+            try:
+                if source_path is None:
+                    raise RuntimeError("Source video file is missing; clip cannot be rendered")
+                duration = project.video.duration if project.video else None
+                if duration is not None and (clip.start >= duration or clip.end > duration + 0.1):
+                    raise ValueError("Clip timestamps exceed the source video duration")
+                output = self.media.render_clip(source_path, root / "clips" / f"{clip.id}.mp4", clip.start, clip.end)
+                clip.output_path = str(output)
+                clip.status = "READY"
+                project.status_message = "Selected clip is ready"
+            except Exception as exc:
+                clip.status = "FAILED"
+                clip.error_message = str(exc)[-4000:]
+                project.status_message = "Selected clip rendering failed; retry the clip"
+            project.status = "READY"
+            session.commit()
+
     @staticmethod
     def _fail(session: Session, project_id: str, exc: Exception) -> None:
         session.rollback()
@@ -201,3 +242,7 @@ def run_pipeline(project_id: str) -> None:
 
 def render_project_clips(project_id: str) -> None:
     Pipeline().render_clips(project_id)
+
+
+def render_project_clip(project_id: str, clip_id: str) -> None:
+    Pipeline().render_clip(project_id, clip_id)
