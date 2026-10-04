@@ -1,16 +1,28 @@
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
 .venv/
+*.egg-info/
+
+# Environment / secrets
 .env
+.env.*
 cookies.txt
 *.cookies.txt
+
+# Generated application data
 /storage/projects/
+
+# Frontend
 frontend/node_modules/
 frontend/dist/
-*.egg-info/
+*.tsbuildinfo
+
+# Agent / local tooling
 __agent__/
-CODEBASE_IMPLEMNTATION_PLAN.md
-PROJECT_DESCRIPTION.md
+
+# Generated audit / planning artifacts
 AUDIT.md
+CODEBASE_IMPLEMENTATION_PLAN.md
