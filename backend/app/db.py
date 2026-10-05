@@ -19,10 +19,23 @@ class Base(DeclarativeBase):
 
 @lru_cache
 def get_engine(database_url: str | None = None) -> Engine:
-    url = database_url or get_settings().database_url
+    settings = get_settings()
+    url = database_url or settings.database_url
     kwargs = {"pool_pre_ping": True, "hide_parameters": True}
     if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": settings.database_lock_timeout_seconds}
+    else:
+        kwargs["pool_timeout"] = settings.database_connect_timeout_seconds
+        kwargs["connect_args"] = {
+            "connect_timeout": settings.database_connect_timeout_seconds,
+            "options": (
+                f"-c statement_timeout={settings.database_statement_timeout_seconds * 1000} "
+                f"-c lock_timeout={settings.database_lock_timeout_seconds * 1000}"
+            ),
+            # Bound a dead peer as well as server-side query/lock execution.
+            "keepalives": 1, "keepalives_idle": 5, "keepalives_interval": 2, "keepalives_count": 3,
+            "tcp_user_timeout": 10000,
+        }
     return create_engine(url, **kwargs)
 
 
@@ -39,7 +52,6 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db(database_url: str | None = None) -> None:
-    # Import registers all model tables before metadata creation.
-    from . import models  # noqa: F401
+    from .migrations import ensure_schema
 
-    Base.metadata.create_all(get_engine(database_url))
+    ensure_schema(get_engine(database_url))

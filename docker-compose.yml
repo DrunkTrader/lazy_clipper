@@ -1,14 +1,19 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: lazy_clipper
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      APP_DATABASE_PASSWORD_FILE: /run/secrets/app_database_password
+    secrets:
+      - postgres_admin_password
+      - app_database_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./scripts/setup-database-role.sh:/opt/lazyclipper/setup-database-role.sh:ro
+      - ./scripts/init-database.sh:/docker-entrypoint-initdb.d/10-lazyclipper.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d lazy_clipper"]
       interval: 3m
@@ -18,11 +23,14 @@ services:
       retries: 10
 
   api:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/lazy_clipper
+      DATABASE_URL: postgresql+psycopg://lazyclipper@postgres:5432/lazy_clipper
+      DATABASE_PASSWORD_FILE: /run/secrets/app_database_password
+      CORS_ALLOWED_ORIGINS: "[]"
       STORAGE_DIR: /app/storage
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -38,16 +46,28 @@ services:
       TRANSCRIPT_CHUNK_SECONDS: ${TRANSCRIPT_CHUNK_SECONDS:-300}
       TRANSCRIPT_OVERLAP_SECONDS: ${TRANSCRIPT_OVERLAP_SECONDS:-45}
       MAX_MOMENTS: ${MAX_MOMENTS:-10}
+      MAX_QUEUED_JOBS: ${MAX_QUEUED_JOBS:-4}
+      MAX_SOURCE_SECONDS: ${MAX_SOURCE_SECONDS:-7200}
+      MAX_CLIP_SECONDS: ${MAX_CLIP_SECONDS:-180}
+      INGESTION_TIMEOUT_SECONDS: ${INGESTION_TIMEOUT_SECONDS:-7200}
+      CLIP_TIMEOUT_SECONDS: ${CLIP_TIMEOUT_SECONDS:-960}
+      SUBMISSION_LOCK_TIMEOUT_SECONDS: ${SUBMISSION_LOCK_TIMEOUT_SECONDS:-1}
+      DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS:-5}
+      DATABASE_STATEMENT_TIMEOUT_SECONDS: ${DATABASE_STATEMENT_TIMEOUT_SECONDS:-10}
+      DATABASE_LOCK_TIMEOUT_SECONDS: ${DATABASE_LOCK_TIMEOUT_SECONDS:-3}
+      STORAGE_MAX_BYTES: ${STORAGE_MAX_BYTES:-53687091200}
+      STORAGE_MIN_FREE_BYTES: ${STORAGE_MIN_FREE_BYTES:-1073741824}
+      STORAGE_JOB_RESERVE_BYTES: ${STORAGE_JOB_RESERVE_BYTES:-1073741824}
     init: true
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).close()"]
       interval: 3m
       timeout: 5s
       start_period: 30s
       start_interval: 5s
       retries: 6
-    ports:
-      - "8000:8000"
+    secrets:
+      - app_database_password
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -61,13 +81,14 @@ services:
         condition: service_healthy
 
   frontend:
+    restart: unless-stopped
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     ports:
-      - "5173:80"
+      - "${FRONTEND_BIND_ADDRESS:?Set FRONTEND_BIND_ADDRESS to the trusted Tailscale address}:5173:80"
     depends_on:
       api:
         condition: service_healthy
@@ -75,3 +96,9 @@ services:
 volumes:
   postgres_data:
   whisper_cache:
+
+secrets:
+  postgres_admin_password:
+    file: ./.secrets/postgres_admin_password
+  app_database_password:
+    file: ./.secrets/app_database_password

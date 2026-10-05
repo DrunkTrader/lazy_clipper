@@ -105,10 +105,15 @@ class LLMClient:
         transcript = _format_segments(segments)
         proposed = json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
         prompt = _read_prompt("candidate_validation.txt") + proposed + "\n\nSOURCE SEGMENTS:\n" + transcript
+
+        def validate_reviews(payload):
+            review = ValidationResponse.model_validate(payload)
+            review.require_candidate_ids(item["candidate_id"] for item in candidates)
+
         payload = self._json_completion(
             [{"role": "system", "content": "You validate transcript clip candidates rigorously."}, {"role": "user", "content": prompt}],
             "candidate validation",
-            ValidationResponse.model_validate,
+            validate_reviews,
         )
         return ValidationResponse.model_validate(payload)
 
@@ -170,6 +175,11 @@ class MomentAnalyzer:
             if not grounded:
                 continue
             review = self.client.validate(segments, grounded)
+            # Keep the analyzer boundary explicit for alternate client adapters.
+            try:
+                review.require_candidate_ids(item["candidate_id"] for item in grounded)
+            except ValueError as exc:
+                raise LLMResponseError("Candidate review identity did not match the proposal") from exc
             reviews = {item.candidate_id: item for item in review.candidates}
             for item in grounded:
                 verdict = reviews.get(item["candidate_id"])

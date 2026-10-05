@@ -145,3 +145,52 @@ def test_source_segments_keep_project_indexes(monkeypatch):
     ]}]
     result = MomentAnalyzer(settings(), client=LLMClient(settings())).analyze(chunks)
     assert result[0].source_segments == [12, 13]
+
+
+@pytest.mark.parametrize("ids", [[], [0, 0], [99]])
+def test_invalid_review_identity_gets_one_correction_then_fails(monkeypatch, ids):
+    invalid = json.dumps({"candidates": [
+        {"candidate_id": candidate_id, "accepted": False, "reason": "Rejected"} for candidate_id in ids
+    ]})
+    calls = install_fake_openai(monkeypatch, [detection(), invalid, invalid])
+    with pytest.raises(LLMResponseError, match="after one correction"):
+        MomentAnalyzer(settings(), client=LLMClient(settings())).analyze(
+            [{"segments": [segment(0, 10, "Setup"), segment(10, 30, "Payoff")]}]
+        )
+    assert len(calls.calls) == 3
+
+
+def test_missing_review_can_be_corrected_in_existing_bounded_path(monkeypatch):
+    calls = install_fake_openai(monkeypatch, [detection(), '{"candidates":[]}', review()])
+    result = MomentAnalyzer(settings(), client=LLMClient(settings())).analyze(
+        [{"segments": [segment(0, 10, "Setup"), segment(10, 30, "Payoff")]}]
+    )
+    assert len(result) == 1
+    assert len(calls.calls) == 3
+
+
+def test_valid_empty_detection_never_requests_reviews(monkeypatch):
+    calls = install_fake_openai(monkeypatch, ['{"candidates":[]}'])
+    result = MomentAnalyzer(settings(), client=LLMClient(settings())).analyze(
+        [{"segments": [segment(0, 20, "No defensible moment")]}]
+    )
+    assert result == []
+    assert len(calls.calls) == 1
+
+
+def test_reviews_can_be_reordered_and_include_rejections(monkeypatch):
+    rejected = json.loads(review(1, accepted=False))["candidates"][0]
+    accepted = json.loads(review(0))["candidates"][0]
+    calls = install_fake_openai(monkeypatch, [json.dumps({"candidates": [rejected, accepted]})])
+    response = LLMClient(settings()).validate([segment(0, 20, "Source")], [{"candidate_id": 0}, {"candidate_id": 1}])
+    assert [item.candidate_id for item in response.candidates] == [1, 0]
+    assert len(calls.calls) == 1
+
+
+def test_duplicate_reviews_with_expected_count_still_fail(monkeypatch):
+    item = json.loads(review())["candidates"][0]
+    duplicate = json.dumps({"candidates": [item, item]})
+    calls = install_fake_openai(monkeypatch, [duplicate, duplicate])
+    with pytest.raises(LLMResponseError, match="after one correction"):
+        LLMClient(settings()).validate([segment(0, 20, "Source")], [{"candidate_id": 0}, {"candidate_id": 1}])
+    assert len(calls.calls) == 2

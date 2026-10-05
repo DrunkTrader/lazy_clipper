@@ -1,4 +1,5 @@
 import { ApiError, FailureFields, FailureStage } from './errors'
+import { isClip, isClips, isIngest, isMoments, isProject, isProjects, isProjectStatus, isTranscript } from './contracts'
 
 export type JsonObject = Record<string, unknown>
 
@@ -56,7 +57,16 @@ export type ClipsResponse = {
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000').replace(/\/$/, '')
 
-async function request<T>(path: string, stage: FailureStage, init?: RequestInit): Promise<T> {
+export function resolveApiMediaUrl(value: string | null): string | null {
+  if (value === null || !value.startsWith('/')) return value
+  return API_BASE_URL ? `${API_BASE_URL}${value}` : value
+}
+
+function resolveClip(clip: GeneratedClip): GeneratedClip {
+  return { ...clip, media_url: resolveApiMediaUrl(clip.media_url), download_url: resolveApiMediaUrl(clip.download_url) }
+}
+
+async function request<T>(path: string, stage: FailureStage, valid: (value: unknown) => value is T, init?: RequestInit): Promise<T> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 30000)
   try {
@@ -69,6 +79,10 @@ async function request<T>(path: string, stage: FailureStage, init?: RequestInit)
         ...init?.headers,
       },
     })
+    if (response.status === 204) {
+      if (!valid(undefined)) throw new ApiError(500, null, stage)
+      return undefined as T
+    }
     const body = await response.text()
     let parsed: unknown
     try {
@@ -79,7 +93,8 @@ async function request<T>(path: string, stage: FailureStage, init?: RequestInit)
     if (!response.ok || parsed === undefined) {
       throw new ApiError(response.ok ? 500 : response.status, parsed, stage)
     }
-    return parsed as T
+    if (!valid(parsed)) throw new ApiError(500, null, stage)
+    return parsed
   } catch (error) {
     if (error instanceof ApiError) throw error
     throw new ApiError(0, null, stage)
@@ -89,41 +104,56 @@ async function request<T>(path: string, stage: FailureStage, init?: RequestInit)
 }
 
 export function createProject(url: string): Promise<JsonObject> {
-  return request<JsonObject>('/api/v1/ingest', 'ingestion', {
+  return request<JsonObject>('/api/v1/ingest', 'ingestion', isIngest, {
     method: 'POST',
     body: JSON.stringify({ url }),
   })
 }
 
-export function getProjects(): Promise<Project[]> {
-  return request<Project[]>('/api/v1/projects', 'database')
+export const PROJECTS_PAGE_SIZE = 25
+
+export function getProjects(offset = 0, limit = PROJECTS_PAGE_SIZE): Promise<Project[]> {
+  return request<Project[]>(`/api/v1/projects?limit=${limit}&offset=${offset}`, 'database', isProjects)
 }
 
 export function getProject(projectId: string): Promise<Project> {
-  return request<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}`, 'database')
+  return request<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}`, 'database',
+    (value): value is Project => isProject(value) && value.id === projectId)
 }
 
 export function getProjectStatus(projectId: string): Promise<ProjectStatus> {
-  return request<ProjectStatus>(`/api/v1/projects/${encodeURIComponent(projectId)}/status`, 'database')
+  return request<ProjectStatus>(`/api/v1/projects/${encodeURIComponent(projectId)}/status`, 'database',
+    (value): value is ProjectStatus => isProjectStatus(value) && value.project_id === projectId)
 }
 
 export function getTranscript(projectId: string): Promise<unknown> {
-  return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/transcript`, 'database')
+  return request<JsonObject>(`/api/v1/projects/${encodeURIComponent(projectId)}/transcript?include_words=false`, 'database',
+    (value): value is JsonObject => isTranscript(value) && value.project_id === projectId)
 }
 
 export function getMoments(projectId: string): Promise<unknown> {
-  return request<unknown>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`, 'database')
+  return request<JsonObject>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`, 'database',
+    (value): value is JsonObject => isMoments(value) && value.project_id === projectId)
 }
 
 export function getClips(projectId: string): Promise<ClipsResponse> {
-  return request<ClipsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, 'media')
+  return request<ClipsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, 'media',
+    (value): value is ClipsResponse => isClips(value) && value.project_id === projectId).then((response) => ({
+      ...response, clips: response.clips.map(resolveClip),
+    }))
 }
 
 export function createClip(projectId: string, payload: { moment_id: string; start: number; end: number }): Promise<GeneratedClip> {
-  return request<GeneratedClip>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, 'rendering', {
+  return request<GeneratedClip>(`/api/v1/projects/${encodeURIComponent(projectId)}/clips`, 'rendering',
+    (value): value is GeneratedClip => isClip(value) && value.project_id === projectId && value.moment_id === payload.moment_id, {
     method: 'POST',
     body: JSON.stringify(payload),
-  })
+  }).then(resolveClip)
+}
+
+export function deleteProject(projectId: string): Promise<void> {
+  return request<void>(`/api/v1/projects/${encodeURIComponent(projectId)}`, 'database',
+    (value): value is void => value === undefined, { method: 'DELETE' })
 }
 
 export function asRecord(value: unknown): JsonObject {

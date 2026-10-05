@@ -96,9 +96,19 @@ class DiagnosticFormatter(logging.Formatter):
                 message = f"validation types={[item['type'] for item in exc.errors()]}"
             elif database:
                 # SQL and driver DETAIL can echo complete user rows even with
-                # hide_parameters enabled. Retain the primary driver diagnostic.
+                # hide_parameters enabled. Keep only SQLSTATE/class and a tiny
+                # allowlist of generic transport diagnostics.
                 original = getattr(exc, "orig", None) or exc
-                message = str(original).splitlines()[0] if str(original) else "Database statement failed"
+                sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+                if not isinstance(sqlstate, str) or not re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
+                    sqlstate = "unknown"
+                generic = re.match(
+                    r"(?i)^(?:database )?(?:unavailable|connection (?:refused|reset|closed)|server closed the connection unexpectedly|timeout)$",
+                    str(original).strip(),
+                )
+                message = f"database driver failure sqlstate={sqlstate or 'unknown'}"
+                if generic:
+                    message += f" ({generic.group(0).lower()})"
             else:
                 message = str(exc)
             parts.append(f"{type(exc).__name__}: {redact(message)}\n")
@@ -146,6 +156,15 @@ def log_failure(exc: Exception, *, project_id: str | None, stage: str, clip_id: 
         "[%s] project=%s clip=%s stage=%s status=failed type=%s",
         context, project_id or "-", clip_id or "-", stage, type(exc).__name__,
         exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+def log_client_error(exc: Exception, *, project_id: str | None, stage: str, status: int,
+                     clip_id: str | None = None, context: str = "API") -> None:
+    """Record expected request mistakes without exception tracebacks."""
+    logger.warning(
+        "[%s] project=%s clip=%s stage=%s status=rejected http_status=%s type=%s",
+        context, project_id or "-", clip_id or "-", stage, status, type(exc).__name__,
     )
 
 

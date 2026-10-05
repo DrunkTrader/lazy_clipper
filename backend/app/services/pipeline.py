@@ -6,14 +6,16 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from ..analysis.moments import calculate_composite_score
-from ..analysis.transcript import chunk_segments, normalize_segments
+from ..analysis.transcript import chunk_segments, normalize_segments, require_word_alignment
 from ..config import Settings, get_settings
 from ..db import session_factory
-from ..errors import Stage, failure_stage, processing_error
+from ..errors import CAPTION_MESSAGES, LIMIT_MESSAGES, Stage, WorkloadLimitError, failure_stage, processing_error
 from ..logging import log_failure, log_stage
 from ..models import Clip, Moment, Project, TranscriptSegment, Video
-from .captions import select_words, write_ass
+from .captions import CaptionError, require_clip_alignment, select_words, write_ass
 from .media import MediaService
+from .limits import require_clip_duration, require_source_duration
+from .storage import atomic_write_text
 from .transcription import WhisperTimestampedTranscriber
 from .youtube import YoutubeService
 
@@ -66,6 +68,7 @@ class Pipeline:
                 log_stage(project_id, stage, "started")
                 self._status(session, project, "INGESTING", "Reading video metadata")
                 metadata = self.youtube.get_metadata(project.source_url)
+                require_source_duration(metadata.duration, self.settings.max_source_seconds)
                 video = video or Video(project_id=project.id)
                 video.youtube_id = metadata.youtube_id
                 video.title = metadata.title
@@ -84,6 +87,7 @@ class Pipeline:
                 session.commit()
                 log_stage(project_id, stage, "completed")
 
+            require_source_duration(video.duration, self.settings.max_source_seconds)
             # Reopening/retrying a project uses its database rows and persisted
             # files. Only an absent stage calls the expensive external service.
             normalized = [
@@ -104,9 +108,12 @@ class Pipeline:
                 stage = "transcription"
                 log_stage(project_id, stage, "started")
                 self._status(session, project, "TRANSCRIBING", "Generating timestamped transcript")
-                normalized = normalize_segments(self.transcriber.transcribe(audio_path))
+                raw_segments = self.transcriber.transcribe(audio_path)
+                require_word_alignment(raw_segments)
+                normalized = normalize_segments(raw_segments)
                 if not normalized:
                     raise RuntimeError("Transcript normalization produced no valid segments")
+                require_word_alignment(normalized)
                 for index, segment in enumerate(normalized):
                     session.add(TranscriptSegment(
                         project_id=project.id,
@@ -117,11 +124,11 @@ class Pipeline:
                         segment_index=index,
                         words=segment.get("words"),
                     ))
-                (root / "transcript" / "transcript.json").write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+                atomic_write_text(root / "transcript" / "transcript.json", json.dumps(normalized, indent=2))
                 session.commit()
                 log_stage(project_id, stage, "completed")
 
-            if not project.moments:
+            if not project.analysis_completed:
                 stage = "analysis"
                 log_stage(project_id, stage, "started")
                 self._status(session, project, "ANALYZING", "Finding and ranking candidate moments")
@@ -147,6 +154,7 @@ class Pipeline:
                         source_segments=candidate.source_segments,
                         dimensions=candidate.scores.model_dump(),
                     ))
+                project.analysis_completed = True
                 session.commit()
                 log_stage(project_id, stage, "completed")
             self._status(session, project, "READY", f"Analysis complete: {len(project.moments)} moments ready for clipping")
@@ -245,6 +253,8 @@ class Pipeline:
 
     def _render_clip_media(self, project: Project, clip: Clip, source_path: Path, root: Path) -> Path:
         """Render one user-selected range using only persisted word timestamps."""
+        require_clip_duration(clip.start, clip.end, self.settings.max_clip_seconds)
+        require_clip_alignment(project.transcript_segments, clip.start, clip.end)
         words = select_words(project.transcript_segments, clip.start, clip.end)
         subtitle_path = root / "clips" / f"{clip.id}.ass"
         try:
@@ -270,7 +280,9 @@ class Pipeline:
             project = session.get(Project, project_id)
             if project is not None:
                 project.status = "FAILED"
-                project.status_message = processing_error(stage).message
+                project.status_message = (
+                    LIMIT_MESSAGES[exc.code] if isinstance(exc, WorkloadLimitError) else processing_error(stage).message
+                )
                 project.error_message = project.status_message
                 session.commit()
         except Exception as persist_exc:
@@ -289,7 +301,12 @@ class Pipeline:
             if clip is not None and clip.project_id == project_id:
                 clip.status = "FAILED"
                 clip.output_path = None
-                clip.error_message = processing_error(stage).message
+                clip.error_message = (
+                    CAPTION_MESSAGES.get(exc.code, processing_error(stage).message)
+                    if isinstance(exc, CaptionError) else processing_error(stage).message
+                )
+                if isinstance(exc, WorkloadLimitError):
+                    clip.error_message = LIMIT_MESSAGES[exc.code]
                 if project is not None:
                     project.status = "READY"
                     project.status_message = "Selected clip rendering failed; retry the clip"

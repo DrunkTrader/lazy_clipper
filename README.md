@@ -1,278 +1,182 @@
-# LazyClipper MVP
+# LazyClipper
 
-LazyClipper turns a long-form YouTube video into timestamped clip candidates and captioned vertical clips. Paste a video URL, let the app find moments worth keeping, then render only the clips you choose.
+LazyClipper turns long-form YouTube videos into timestamped moment suggestions and captioned vertical clips. Paste a video URL, review the transcript and AI-ranked moments, then render only the clips you choose.
 
-For component boundaries, data flow, persistence, runtime topology, and detailed processing workflows, see [ARCHITECTURE.md](ARCHITECTURE.md).
+The original video plays through YouTube. Generated clips can be previewed and downloaded from the workspace; saved projects can be reopened without rerunning processing.
 
-![LazyClipper workspace showing a processed project, suggested moments, transcript, and generated clip](assets/img_lazy.png)
+## Screenshots
 
-The backend keeps the downloaded source for word-timestamped Whisper/LLM processing, but the frontend plays the original through YouTube's IFrame Player API. A suggested moment only becomes a deterministic center-cropped 9:16 MP4 (H.264 video, AAC audio) with burned-in word captions after the user clicks **Create Clip**. Advanced editing, intelligent reframing, publishing, and social integrations remain out of scope.
+![Processed project with suggested moments, transcript, and a generated clip](assets/img_lazy.png)
 
-Full-video transcription persists segment and word timestamps once. Clip creation selects the stored words overlapping the requested range, writes a temporary ASS subtitle file, and burns it into only that requested clip; it never transcribes the clip again or renders captions for the original video.
+![Project creation and project header](assets/img_lazy_1.png)
 
-There are no demo or static-data fallbacks. If ingestion, audio extraction, transcription, or LLM analysis fails, the project is persisted as `FAILED` with a safe stage-specific message. Technical exception diagnostics stay in redacted backend logs. Individual clip-render failures are stored on the clip; other clips continue, and the project remains usable.
+![Suggested moments and timestamped transcript](assets/img_lazy_2.png)
 
-## What you can do
+## Features
 
-- Submit a YouTube URL and create a reusable project.
-- Inspect the original video through YouTube, alongside its transcript and AI-ranked moments.
-- Jump to a suggested moment before deciding whether to create a clip.
-- Render a selected moment as a center-cropped 1080×1920 MP4 with burned-in word captions.
-- Preview or download completed clips, and retry individual failed renders without rerunning analysis.
-
-### Start a project
-
-The workspace begins with a focused URL entry point and keeps saved projects available for later inspection.
-
-![LazyClipper project creation and project header](assets/img_lazy_1.png)
-
-### Review moments and transcript
-
-When processing completes, suggested moments appear beside the timestamped transcript. Selecting a moment seeks the YouTube player; creating a clip is always an explicit action.
-
-![LazyClipper suggested moments and transcript](assets/img_lazy_2.png)
+- Create reusable projects from YouTube URLs.
+- Review timestamped transcripts and ranked moment suggestions.
+- Jump to a moment in the original video before creating a clip.
+- Render selected moments as center-cropped 1080×1920 MP4s with burned-in word captions.
+- Preview and download completed clips.
+- Retry failed processing or individual clips while retaining completed work.
 
 ## Requirements
 
-- Docker with BuildKit and Docker Compose v2+ for the recommended setup
-- A YouTube-accessible URL for the selected video
-- An OpenAI-compatible LLM gateway, such as FreeLLMAPI
-- An API key and model configured in that gateway
+- Docker with BuildKit and Docker Compose v2, using Linux containers.
+- Git and Python 3 for the database-secret setup script.
+- Tailscale access on the server and client for the default private deployment.
+- A reachable OpenAI-compatible LLM provider/gateway, API key, and model.
+- A YouTube URL accessible from the server.
 
-The application uses `yt-dlp`, `yt-dlp-ejs`, Node.js, FFmpeg with libass subtitle support, `whisper-timestamped`, PostgreSQL, SQLAlchemy, FastAPI, React, and Vite.
+Compose provides PostgreSQL, FFmpeg, Node.js, and the transcription dependencies. The first build downloads large dependencies; the first transcription downloads the configured Whisper model. Allow disk space for images, models, and project media.
 
-The backend image installs the pinned Python packages `yt-dlp==2026.8.19` and `yt-dlp-ejs==0.8.0` from `pyproject.toml`; it does not depend on `/usr/bin/yt-dlp` or a host-installed yt-dlp. Node.js 22.23.3 is included in the image and is used by `yt-dlp-ejs` for modern YouTube JavaScript challenge solving.
+## Quick Start — Docker
+
+Run these commands from the repository root after cloning:
+
+```bash
+git clone https://github.com/DrunkTrader/lazy_clipper.git
+cd lazy_clipper
+test -f .env || cp .env.example .env
+python3 scripts/setup_secrets.py
+tailscale ip -4
+```
+
+Edit `.env`: set `FRONTEND_BIND_ADDRESS` to the server's Tailscale IPv4 address and supply `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`. Leave `VITE_API_BASE_URL` empty for Compose.
+
+For an existing database, follow the [database upgrade guide](docs/DATABASE.md#schema-upgrades) before starting the API.
+
+```bash
+docker compose up -d --build --wait
+docker compose ps
+```
+
+Open `http://<FRONTEND_BIND_ADDRESS>:5173`, paste a YouTube URL, and click **Create project**. After analysis, use **Jump to moment**, **Create Clip**, **Preview**, and **Download**.
+
+Verify liveness and readiness using the same address:
+
+```bash
+curl --fail http://<FRONTEND_BIND_ADDRESS>:5173/health
+curl --fail http://<FRONTEND_BIND_ADDRESS>:5173/ready
+```
+
+Only the frontend is published; the API and PostgreSQL stay internal to Compose. See [Deployment](docs/DEPLOYMENT.md) for the private-network access boundary.
 
 ## Configuration
 
-Create a local environment file:
+Use [`.env.example`](.env.example) for the complete configuration reference.
+
+| Variable | Purpose |
+| --- | --- |
+| `FRONTEND_BIND_ADDRESS` | Server's trusted Tailscale IPv4 address; required by Compose |
+| `LLM_BASE_URL` | OpenAI-compatible API base URL |
+| `LLM_API_KEY` | Provider/gateway credential |
+| `LLM_MODEL` | Model identifier offered by the provider |
+| `VITE_API_BASE_URL` | Empty for Compose; set only for a separate API origin |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` | Transcription model/device; defaults are `small` / `cpu` |
+
+The LLM URL, key, and model must be valid, non-placeholder settings. Startup checks configuration without contacting the provider. For a gateway such as FreeLLMAPI running on the Docker host, use `http://host.docker.internal:3001/v1`; for local development, use its locally reachable address.
+
+For videos requiring authentication, place an exported Netscape-format cookie file at `cookies.txt` before startup. Compose mounts it read-only at `/app/cookies.txt`; an absent file is ignored. Cookies are authentication material: never commit them, put their contents in `.env`, copy them into images, or log them. See [Troubleshooting](docs/TROUBLESHOOTING.md#youtube-access-and-cookies) for cookie and yt-dlp checks.
+
+## Database
+
+LazyClipper uses PostgreSQL for project metadata; media files live under `storage/projects/`. A fresh Compose volume initializes the database role automatically, and the API initializes a fresh schema. Database secrets are generated by `scripts/setup_secrets.py` without printing or overwriting existing credentials.
+
+Inspect the schema revision:
 
 ```bash
-cp .env.example .env
+docker compose exec api python -m backend.app.migrations status
 ```
 
-The required LLM settings are:
+Startup refuses outdated or incompatible existing schemas. Upgrades use `python -m backend.app.migrations upgrade` with the API stopped and the table owner's credentials. Follow [Database maintenance](docs/DATABASE.md) for the Compose command, role/password changes, coordinated backups, restore testing, and rollback.
 
-```env
-LLM_BASE_URL=http://127.0.0.1:3001/v1
-LLM_API_KEY=your-api-key
-LLM_MODEL=your-model-id
-```
+## Local Development
 
-FreeLLMAPI only requires changing those three values. If FreeLLMAPI runs on the host while the API runs in Compose, use:
+Requires Linux, Python 3.12+, PostgreSQL, Node.js 22+ with npm, and FFmpeg/ffprobe with libass subtitle support.
 
-```env
-LLM_BASE_URL=http://host.docker.internal:3001/v1
-```
+### Backend
 
-The Compose configuration maps `host.docker.internal` on Linux. A reachable remote or Tailscale URL can also be used directly.
-
-Optional LLM controls are available in `.env.example`:
-
-```env
-LLM_TEMPERATURE=0.2
-LLM_MAX_TOKENS=4000
-LLM_TIMEOUT=120
-LLM_MAX_RETRIES=2
-```
-
-The YouTube runtime settings are:
-
-```env
-YTDLP_JS_RUNTIME=node
-YTDLP_COOKIE_FILE=/app/cookies.txt
-```
-
-`YTDLP_COOKIE_FILE` is optional. The Python integration only passes a cookie file to yt-dlp when the configured path exists and is a regular file. In local non-Compose development, use a local path such as `YTDLP_COOKIE_FILE=./cookies.txt`.
-
-The media/transcription settings include `WHISPER_MODEL`, `WHISPER_DEVICE`, transcript chunk/overlap sizes, and `MAX_MOMENTS`.
-
-## YouTube ingestion and optional cookies
-
-The ingestion service uses yt-dlp's Python API. For every metadata lookup and download it configures:
-
-- `js_runtimes: {"node": {}}` by default, using `YTDLP_JS_RUNTIME`.
-- `cookiefile` only when `YTDLP_COOKIE_FILE` points to an existing file.
-- The existing canonical YouTube URL validation, MP4 format selection, size limit, retry settings, and storage paths.
-
-Cookies are useful for videos that require an authenticated YouTube session or are blocked without browser session data. They are not required for every URL.
-
-**Security:** `cookies.txt` contains authentication material. Never commit it, put it in `.env`, copy it into the Docker image, paste it into logs, or share it. `.gitignore` excludes both `cookies.txt` and `*.cookies.txt`. The Compose mount is read-only and only exposes the file to the API container.
-
-## Run with Docker Compose
-
-From the repository root, build and start PostgreSQL, the FastAPI backend, and the compiled React frontend:
+From the repository root:
 
 ```bash
-# First setup only: copy .env.example to .env and configure your LLM gateway.
-# Keep an existing .env; do not overwrite working credentials.
-docker compose up -d --build --wait
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[transcription,test]' ruff
+test -f .env || cp .env.example .env
 ```
 
-No temporary Compose override, host Python/Node installation, or source bind mount is needed. Use the same command after code changes. API startup waits for PostgreSQL to be healthy; frontend startup waits for the API. Check readiness and logs with:
+Provision a local PostgreSQL database and role, then set `DATABASE_URL` to that reachable database in `.env`. Supply the password through the URL or `DATABASE_PASSWORD_FILE`, and configure the LLM settings. For a gateway on the same machine, use `http://127.0.0.1:3001/v1`. Compose's PostgreSQL port is not published for this workflow.
 
 ```bash
-docker compose ps
-docker compose logs --tail=100 api frontend
+uvicorn backend.app.main:app --reload
 ```
 
-Build behavior:
+The API runs at `http://localhost:8000`. For tests without real transcription, install `'.[test]'` instead of `'.[transcription,test]'`.
 
-- **Backend:** dependencies are installed from `pyproject.toml` in a cached build stage before application source is copied. Editing Python code does not reinstall the transcription/PyTorch dependencies. BuildKit also caches pip downloads; build tools are excluded from the runtime image.
-- **Frontend:** `npm ci` installs the checked-in lockfile during the image build, followed by the TypeScript/Vite build. Nginx serves the compiled assets; startup no longer runs npm or depends on host `node_modules`.
-- **API access:** by default the frontend proxies `/api/` to the API container, including generated clip playback and downloads. This works with the hostname used to open the frontend, not a hard-coded browser-side `localhost:8000`. Set `VITE_API_BASE_URL` only when using a separate API origin, then rebuild the frontend; Vite embeds this value at build time.
+### Frontend
 
-The first build still downloads the large transcription dependencies. Subsequent builds reuse them unless `pyproject.toml` or the base image changes. Do not use `--no-cache` for normal updates; it deliberately discards these image-layer savings. Model downloads are reused separately through the existing `whisper_cache` volume.
+In a second shell:
 
-Compose mounts an optional host file using:
-
-```text
-./cookies.txt:/app/cookies.txt:ro
+```bash
+cd frontend
+npm ci
+npm run dev
 ```
 
-If `cookies.txt` is absent, Docker's optional bind mount creates an empty directory at that path; the application ignores it and continues without cookies. To use cookies, place an exported Netscape-format cookie file at `./cookies.txt` before starting the stack. If Docker previously created an empty `cookies.txt` directory, stop the stack and remove that empty directory with `rmdir cookies.txt` before placing the real file. Keep `YTDLP_COOKIE_FILE=/app/cookies.txt` for Compose; use `./cookies.txt` for local non-Compose development.
+Open the URL printed by Vite (normally `http://localhost:5173`). Leave `VITE_API_BASE_URL` unset for the local API default, `http://localhost:8000`; set it in Vite's environment for a different API origin. Local origins are controlled by `CORS_ALLOWED_ORIGINS`. For local cookies, set `YTDLP_COOKIE_FILE=./cookies.txt` in the backend environment.
 
-Open:
+## Docker Operations
 
-- Frontend: <http://localhost:5173>
-- API documentation: <http://localhost:8000/docs>
-- Health check: <http://localhost:8000/health>
+Run from the repository root:
 
-Paste a YouTube URL and click **Create project**. The frontend polls the project through ingestion, transcription, and analysis. Suggested moments control the YouTube player with **Jump to moment**. **Create Clip** sends that moment's timestamps to the API; the backend renders only the requested vertical MP4 and the workspace then shows its processing state, **Preview**, and **Download**.
-
-The `?project_id=...` URL and **Saved projects** links reopen database-backed projects using GET requests only. Submitting the same YouTube video reuses its existing project rather than creating a duplicate. Explicitly resubmitting a failed project retries missing pipeline stages while retaining its downloaded source, audio, transcript, and moments. If a completed project's source file was deleted, an explicit submission restores it while preserving saved analysis; refreshing never redownloads it.
-
-Each moment has its own **Create Clip** action. **Retry Clip** rerenders a failed or missing output without downloading, transcribing, analyzing, or replacing successful clips. Refresh never automatically starts clip rendering.
-
-The first backend image build installs `whisper-timestamped` and may take several minutes. It also installs the pinned yt-dlp packages, Node.js, and FFmpeg inside the image. The first transcription downloads the configured Whisper model. Media and transcript files are stored under:
-
-```text
-storage/projects/<project_id>/
-├── source/video.mp4
-├── audio/audio.wav
-├── transcript/transcript.json
-└── clips/<clip_id>.mp4
+```bash
+docker compose up -d --wait                  # Start existing images
+docker compose stop                         # Stop containers
+docker compose up -d --build --wait          # Rebuild and start after changes
+docker compose logs --tail=100 api frontend  # Application logs
+docker compose ps                           # Service status
 ```
 
-The database stores clip ownership, moment ID, timestamps, status, errors, and file paths—not media bytes. Startup creates the additive `clips` table in existing databases. Incomplete renders use temporary files and are only published after FFmpeg succeeds.
+Run one API process per database/storage directory. For interrupted work, explicitly resubmit ingestion or use **Retry Clip**; reloading a project never starts processing. See [Troubleshooting](docs/TROUBLESHOOTING.md) for failures and [Deployment](docs/DEPLOYMENT.md) for runtime limits and build details.
 
-Stop the local stack with:
+## Reset / Remove
+
+Stop and remove containers while preserving database/model volumes and generated media:
 
 ```bash
 docker compose down
 ```
 
-This preserves database/model volumes and the `storage/` bind mount. Do not add `--volumes` unless you intend to delete the database and model cache. For live source editing rather than image rebuilds, use the local development commands below.
+**Destructive: the following commands permanently delete local data. Back up the database and media together before using them.**
 
-## API
-
-### Create a project
+Remove Docker volumes, including the database and Whisper cache (keeps `storage/`):
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID"}'
+docker compose down --volumes
 ```
 
-The endpoint validates and canonicalizes the URL. For a new video it persists a queued project and submits background processing. For an existing video it returns the saved project; failed projects or completed projects with a missing source file are explicitly retried. The response returns immediately:
-
-```json
-{
-  "project_id": "...",
-  "status": "queued"
-}
-```
-
-### Inspect the project
-
+Remove generated project files only (leaves database references to those files):
 
 ```bash
-curl http://localhost:8000/api/v1/projects/PROJECT_ID
-curl http://localhost:8000/api/v1/projects/PROJECT_ID/status
-curl http://localhost:8000/api/v1/projects/PROJECT_ID/transcript
-curl http://localhost:8000/api/v1/projects/PROJECT_ID/moments
+docker compose down
+rm -rf storage/projects
 ```
 
-The project status moves through:
-
-```text
-QUEUED → INGESTING → TRANSCRIBING → ANALYZING → READY
-```
-
-Ingestion and analysis can end in:
-
-```text
-FAILED
-```
-
-After analysis is `READY`, an individual clip request temporarily uses `RENDERING` while FFmpeg creates that selected clip, then returns the project to `READY`.
-
-Failure responses include a safe stage and structured error; for example, an analysis failure has:
-
-```json
-{
-  "status": "FAILED",
-  "failed_stage": "analysis",
-  "error": {
-    "code": "PROCESSING_ERROR",
-    "message": "Internal server error during AI analysis."
-  }
-}
-```
-
-HTTP error envelopes use lowercase `"failed"`. Safe validation errors use application-owned codes such as `INVALID_URL` and `INVALID_RANGE`. Successful response shapes are unchanged. Existing `error_message` fields contain only the public message for new failures; legacy raw errors are sanitized on read without rewriting saved projects or requiring a migration. Empty or invalid word-timestamped Whisper output is treated as a failure rather than as a successful project with fake transcript data.
-
-The frontend loads project details, transcript, moments, and clips when opened or explicitly reloaded, polls only `/status` every four seconds while processing (including clip rendering), refreshes details once at completion, and stops at `READY`/`FAILED`. Requests time out after 30 seconds and display a safe network message. Error display uses local message allowlists rather than arbitrary server/proxy text.
-
-Backend logs include project/clip IDs, stage lifecycle events, and redacted exception tracebacks. Credentials, request payloads, validation inputs, and SQL parameters are excluded. API and PostgreSQL healthchecks run every three minutes after fast startup checks. Uvicorn and Nginx routine access logging is disabled; application and error logs remain available via `docker compose logs api frontend`.
-
-Other available endpoints include:
-
-```text
-GET /api/v1/projects
-GET  /api/v1/projects/{project_id}/clips
-POST /api/v1/projects/{project_id}/clips
-GET  /api/v1/projects/{project_id}/clips/{clip_id}/media
-GET  /api/v1/projects/{project_id}/clips/{clip_id}/media?download=true
-```
-
-The downloaded source video is never served to the frontend. The project response exposes the YouTube video ID for IFrame playback. Generated clip media is served only from the requested project's clips directory, with byte-range support for playback and an attachment response for downloads. JSON responses expose clip URLs, not filesystem paths.
-
-The clip POST accepts `moment_id`, `start`, and `end`, persists one queued clip, and submits only that clip to the existing thread pool. It reuses a valid `READY` output and can retry a failed/missing output. All GET routes are read-only.
-
-Clip statuses are `QUEUED`, `RENDERING`, `READY`, and `FAILED`. A failed clip includes the same `failed_stage`/`error` contract plus the safe, backward-compatible `error_message` field.
-
-## Captioned clips
-
-Full-video transcription stores word-level timing once. When a clip is requested, the renderer selects the stored words in that range, creates temporary ASS subtitles, and burns them into the MP4 with FFmpeg's libass-backed `subtitles` filter. The active word is amber and surrounding words are white in a sliding four-word window.
-
-Caption styling belongs to the rendered video, so existing MP4s need to be rerendered after a style change. Clip creation reuses persisted word timings and never retranscribes the selected range. See [ARCHITECTURE.md](ARCHITECTURE.md#caption-generation-and-highlighting) for the implementation details and native subtitle checks.
-
-## Local development without Compose
-
-A PostgreSQL server and system FFmpeg with libass subtitle support must be available. `whisper-timestamped` is optional locally because it is a large dependency:
+Complete local reset, including data, local dependencies/builds, `.env`, database secrets, and optional cookies. This retains the checked-out source; repeat the quick start afterward:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[transcription,test]'
-cp .env.example .env
-uvicorn backend.app.main:app --reload
+docker compose down --volumes
+rm -rf storage/projects .venv frontend/node_modules frontend/dist
+rm -rf .env .secrets cookies.txt
 ```
 
-In another shell:
+For coordinated deletion of one terminal project, use the [project DELETE endpoint](docs/API.md#delete-a-project) rather than deleting its files manually.
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+## Tests / Verification
 
-For local `npm run dev`, set `VITE_API_BASE_URL` if the backend is not running at `http://localhost:8000`. The same-origin Nginx proxy is specific to the Docker frontend.
-
-## Verification
-
-Run the backend checks from the repository root:
+Backend, from the repository root with the local test dependencies installed:
 
 ```bash
 . .venv/bin/activate
@@ -281,51 +185,60 @@ ruff check backend
 pytest -q
 ```
 
-Check and build the frontend (Node 22+ for the built-in test runner):
+Frontend, from `frontend/`:
 
 ```bash
-cd frontend
 npm test
 npm run build
 ```
 
-The test suite uses mocked external services for deterministic unit and integration-contract tests, plus a real FFmpeg/ffprobe clip smoke test when those binaries are installed. Checks cover vertical dimensions/codecs/duration, clip failure isolation and retry, database reuse, GET-only reloads, duplicate submissions, scoped media access, byte ranges, and download headers. Production code does not use mocks or manufacture transcript/moment data.
-
-### Verify the container runtime
-
-After a fresh image build and startup, verify that the dependencies come from the image:
+Basic Docker verification, from the repository root:
 
 ```bash
-docker compose exec api yt-dlp --version
-docker compose exec api node --version
-docker compose exec api python -m pip show yt-dlp
-docker compose exec api python -m pip show yt-dlp-ejs
+docker compose config --quiet
+docker compose ps
+docker compose exec api python -m pip check
 ```
 
-The yt-dlp version should be the modern pip-installed version, and Node.js should be available for EJS solving. To verify YouTube metadata extraction with the same setup used by the application:
+Use the quick-start `/health` and `/ready` checks to verify the proxy. Tests mock external services; the real MP4 smoke test runs when FFmpeg and ffprobe are available. See [Troubleshooting](docs/TROUBLESHOOTING.md#real-workflow-verification) for real-provider verification.
 
-Because the Compose cookie mount is read-only, copy it to a temporary writable file for a direct CLI check (the application does this automatically):
+## API
 
-```bash
-docker compose exec api sh -eu -c '
-  cookie_copy=$(mktemp)
-  cp /app/cookies.txt "$cookie_copy"
-  yt-dlp --ignore-config --js-runtimes node --cookies "$cookie_copy" --simulate \
-    "https://www.youtube.com/watch?v=7EIk0crvc0k"
-  rm -f "$cookie_copy"
-'
+FastAPI documentation is available at `http://<FRONTEND_BIND_ADDRESS>:5173/docs` in Compose or `http://localhost:8000/docs` locally.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/ingest` | Create, reuse, or explicitly retry a project |
+| `GET /api/v1/projects` | List saved projects |
+| `GET /api/v1/projects/{id}/status` | Read processing status |
+| `GET /api/v1/projects/{id}/transcript` / `moments` | Read saved analysis |
+| `GET` / `POST /api/v1/projects/{id}/clips` | List or render clips |
+| `GET /api/v1/processing` | Read processing capacity |
+| `DELETE /api/v1/projects/{id}` | Delete a terminal project and its media |
+
+See [API usage](docs/API.md) for request examples, pagination, media downloads, and error-contract references.
+
+## Project Structure
+
+```text
+backend/app/       FastAPI API, analysis, services, and migrations
+backend/tests/     Backend tests
+frontend/src/      React workspace
+frontend/tests/    Frontend tests
+scripts/           Database role and secret setup
+docs/              Operational guides and API usage
+assets/            Screenshots
+storage/projects/  Generated media and transcripts (Git-ignored)
 ```
 
-If no cookie file is mounted, omit the copy and `--cookies` parts; the application itself does this automatically when the configured file is absent. Successful output should include a line similar to `[jsc:node] Solving JS challenges using node` when YouTube requires the challenge solver.
+## Documentation
 
-For a real application smoke test, start the Compose stack, submit a real YouTube URL, and poll its status until `READY` or `FAILED`:
+- [Architecture](docs/ARCHITECTURE.md): data flow, processing, persistence, captions, and implementation boundaries.
+- [Database](docs/DATABASE.md): role/password changes, migrations, backup/restore, and rollback.
+- [Deployment](docs/DEPLOYMENT.md): private-network setup, configuration policies, and image builds.
+- [Troubleshooting](docs/TROUBLESHOOTING.md): startup, YouTube access, processing failures, and runtime verification.
+- [API usage](docs/API.md): practical requests and client behavior.
 
-```bash
-curl -X POST http://localhost:8000/api/v1/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID"}'
+## License
 
-curl http://localhost:8000/api/v1/projects/PROJECT_ID/status
-```
-
-A successful run must expose non-empty video metadata, transcript segments, and AI-generated moments through the project, transcript, and moments endpoints. YouTube bot checks, unavailable media, missing speech, unavailable Whisper models, or an unavailable LLM provider will correctly produce `FAILED` rather than demo output.
+No license file or license declaration is currently included in the repository.

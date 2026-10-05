@@ -5,6 +5,7 @@ import {
   Moment,
   Project,
   ProjectStatus,
+  PROJECTS_PAGE_SIZE,
   TranscriptSegment,
   asRecord,
   createClip,
@@ -86,6 +87,8 @@ function App() {
   const [savedProjects, setSavedProjects] = useState<Project[]>([])
   const [savedProjectsLoading, setSavedProjectsLoading] = useState(true)
   const [savedProjectsError, setSavedProjectsError] = useState<string | null>(null)
+  const [projectsOffset, setProjectsOffset] = useState(0)
+  const [hasMoreProjects, setHasMoreProjects] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [projectError, setProjectError] = useState<string | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
@@ -96,6 +99,7 @@ function App() {
   const [selected, setSelected] = useState<Selection>(null)
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null)
   const activeProjectId = useRef(projectId)
+  const contentLoadedFor = useRef<string | null>(null)
   const currentStatus = statusName(status)
 
   useEffect(() => {
@@ -106,9 +110,14 @@ function App() {
     let cancelled = false
     setSavedProjectsLoading(true)
     setSavedProjectsError(null)
+    setHasMoreProjects(false)
     getProjects()
       .then((projects) => {
-        if (!cancelled) setSavedProjects(projects)
+        if (!cancelled) {
+          setSavedProjects(projects)
+          setProjectsOffset(projects.length)
+          setHasMoreProjects(projects.length === PROJECTS_PAGE_SIZE)
+        }
       })
       .catch((error) => {
         if (!cancelled) setSavedProjectsError(errorMessage(error))
@@ -121,19 +130,43 @@ function App() {
     }
   }, [projectId])
 
+  async function loadMoreProjects() {
+    if (savedProjectsLoading) return
+    const requestedProjectId = projectId
+    setSavedProjectsLoading(true)
+    setSavedProjectsError(null)
+    try {
+      const next = await getProjects(projectsOffset)
+      if (activeProjectId.current !== requestedProjectId) return
+      setSavedProjects((current) => [...new Map([...current, ...next].map((item) => [item.id, item])).values()])
+      setProjectsOffset((offset) => offset + next.length)
+      setHasMoreProjects(next.length === PROJECTS_PAGE_SIZE)
+    } catch (error) {
+      if (activeProjectId.current === requestedProjectId) setSavedProjectsError(errorMessage(error))
+    } finally {
+      if (activeProjectId.current === requestedProjectId) setSavedProjectsLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
     setProjectLoading(true)
     setClipsLoading(true)
-    setContentLoading(true)
+    setContentLoading(contentLoadedFor.current !== projectId)
     const stop = watchProject(projectId, {
       onStatus: (nextStatus) => {
+        if (['QUEUED', 'INGESTING', 'TRANSCRIBING', 'ANALYZING'].includes(nextStatus.status ?? '')) {
+          contentLoadedFor.current = null
+        }
         setStatus(nextStatus)
         setStatusError(null)
+        setSavedProjects((current) => current.map((item) => item.id === projectId ? { ...item, status: nextStatus.status } : item))
       },
       onError: (error) => setStatusError(errorMessage(error)),
-      onRefresh: async () => {
+      onRefresh: async (nextStatus) => {
+        const reuseContent = contentLoadedFor.current === projectId
+        if (!reuseContent) setContentLoading(true)
         await Promise.all([
           getProject(projectId).then((nextProject) => {
             if (cancelled) return
@@ -144,10 +177,11 @@ function App() {
           }).finally(() => {
             if (!cancelled) setProjectLoading(false)
           }),
-          Promise.all([getTranscript(projectId), getMoments(projectId)]).then(([nextTranscript, nextMoments]) => {
+          reuseContent ? Promise.resolve() : Promise.all([getTranscript(projectId), getMoments(projectId)]).then(([nextTranscript, nextMoments]) => {
             if (cancelled) return
             setTranscript(normalizeTranscript(nextTranscript))
             setMoments(normalizeMoments(nextMoments))
+            if (['READY', 'RENDERING', 'FAILED'].includes(nextStatus?.status ?? '')) contentLoadedFor.current = projectId
             setContentError(null)
           }).catch((error) => {
             if (!cancelled) setContentError(errorMessage(error))
@@ -217,6 +251,7 @@ function App() {
       const response = await createProject(trimmedUrl)
       const newProjectId = extractProjectId(response)
       if (!newProjectId) throw new Error('The API did not return a project_id.')
+      contentLoadedFor.current = null
       setProject(null)
       setStatus(null)
       setTranscript([])
@@ -314,6 +349,9 @@ function App() {
             </li>
           })}
         </ul>
+        {hasMoreProjects && <button type="button" className="clip-button" disabled={savedProjectsLoading} onClick={() => void loadMoreProjects()}>
+          {savedProjectsLoading ? 'Loading projects…' : 'Load more projects'}
+        </button>}
       </details>
 
       {projectId && (
@@ -520,7 +558,7 @@ type YouTubeApi = {
   Player: new (element: HTMLElement, options: {
     videoId: string
     playerVars?: Record<string, number | string>
-    events?: { onReady?: () => void }
+    events?: { onReady?: () => void; onError?: (event: { data?: unknown }) => void }
   }) => YouTubePlayer
 }
 
@@ -532,24 +570,47 @@ declare global {
 }
 
 let youtubeApiPromise: Promise<void> | null = null
+const PLAYER_LOAD_TIMEOUT_MS = 15000
+
+function youtubeError(code: unknown): string {
+  if (code === 101 || code === 150) return 'Embedding is disabled for this video. Open it on YouTube to watch it.'
+  if (code === 100) return 'This source video is unavailable in the embedded player. Try opening it on YouTube.'
+  if (code === 153) return 'YouTube could not verify this player. Try opening the video on YouTube.'
+  return stageMessages.media
+}
 
 function loadYouTubeApi(): Promise<void> {
-  if (window.YT?.Player) return Promise.resolve()
+  if (typeof window.YT?.Player === 'function') return Promise.resolve()
   if (youtubeApiPromise) return youtubeApiPromise
-  youtubeApiPromise = new Promise((resolve, reject) => {
+  youtubeApiPromise = new Promise<void>((resolve, reject) => {
     const previousReady = window.onYouTubeIframeAPIReady
-    window.onYouTubeIframeAPIReady = () => {
-      previousReady?.()
-      resolve()
-    }
     const script = document.createElement('script')
+    let settled = false
+    const finish = (success: boolean) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      if (window.onYouTubeIframeAPIReady === onReady) window.onYouTubeIframeAPIReady = previousReady
+      script.onerror = null
+      if (success) resolve()
+      else {
+        script.remove()
+        reject(new Error('The source player API did not load.'))
+      }
+    }
+    const onReady = () => {
+      finish(typeof window.YT?.Player === 'function')
+      try { previousReady?.() } catch { /* Another consumer must not block our readiness. */ }
+    }
+    const timer = window.setTimeout(() => finish(false), PLAYER_LOAD_TIMEOUT_MS)
+    window.onYouTubeIframeAPIReady = onReady
     script.src = 'https://www.youtube.com/iframe_api'
     script.async = true
-    script.onerror = () => {
-      youtubeApiPromise = null
-      reject(new Error('Could not load the YouTube Player API.'))
-    }
-    document.head.appendChild(script)
+    script.onerror = () => finish(false)
+    try { document.head.appendChild(script) } catch { finish(false) }
+  }).catch((error: unknown) => {
+    youtubeApiPromise = null
+    throw error
   })
   return youtubeApiPromise
 }
@@ -562,33 +623,65 @@ function YoutubePlayer({ videoId, selection, playerRef }: {
   const hostRef = useRef<HTMLDivElement>(null)
   const [ready, setReady] = useState(false)
   const [playerError, setPlayerError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let cancelled = false
+    let failed = false
+    let player: YouTubePlayer | null = null
+    let readinessTimer: number | undefined
+    const container = hostRef.current
     setReady(false)
     setPlayerError(null)
     playerRef.current = null
 
+    const dispose = () => {
+      try { player?.destroy() } catch { /* Remove the iframe even if provider cleanup fails. */ }
+      if (playerRef.current === player) playerRef.current = null
+      player = null
+      container?.replaceChildren()
+    }
+    const fail = (message: string) => {
+      if (cancelled || failed) return
+      failed = true
+      window.clearTimeout(readinessTimer)
+      dispose()
+      setReady(false)
+      setPlayerError(message)
+    }
+
     void loadYouTubeApi().then(() => {
-      if (cancelled || !hostRef.current || !window.YT?.Player) return
-      const player = new window.YT.Player(hostRef.current, {
+      if (cancelled) return
+      if (!container || !window.YT?.Player) { fail(stageMessages.media); return }
+      // YouTube replaces its mount with an iframe. Keep that mutable DOM inside
+      // a stable React-owned container so retries/unmounts can cleanly recreate it.
+      const mount = document.createElement('div')
+      container.appendChild(mount)
+      readinessTimer = window.setTimeout(() => fail('The source player took too long to load. Retry the player or open the video on YouTube.'), PLAYER_LOAD_TIMEOUT_MS)
+      const created = new window.YT.Player(mount, {
         videoId,
         playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
-        events: { onReady: () => {
-          if (!cancelled) setReady(true)
-        } },
+        events: {
+          onReady: () => {
+            if (!cancelled && !failed) {
+              window.clearTimeout(readinessTimer)
+              setReady(true)
+            }
+          },
+          onError: (event) => fail(youtubeError(event.data)),
+        },
       })
-      playerRef.current = player
-    }).catch((error: unknown) => {
-      if (!cancelled) setPlayerError(errorMessage(error, 'media'))
-    })
+      player = created
+      if (cancelled || failed) dispose()
+      else playerRef.current = created
+    }).catch(() => fail(stageMessages.media))
 
     return () => {
       cancelled = true
-      playerRef.current?.destroy()
-      playerRef.current = null
+      window.clearTimeout(readinessTimer)
+      dispose()
     }
-  }, [videoId, playerRef])
+  }, [videoId, playerRef, attempt])
 
   useEffect(() => {
     const player = playerRef.current
@@ -603,14 +696,24 @@ function YoutubePlayer({ videoId, selection, playerRef }: {
     const timer = window.setInterval(() => {
       const player = playerRef.current
       const currentTime = player?.getCurrentTime?.()
-      if (player && currentTime !== undefined && currentTime >= end) player.pauseVideo()
+      if (player && currentTime !== undefined && currentTime >= end) {
+        window.clearInterval(timer)
+        player.pauseVideo()
+      }
     }, 250)
     return () => window.clearInterval(timer)
   }, [ready, selection, playerRef])
 
-  return <div className="youtube-player-frame">
-    <div ref={hostRef} aria-label="YouTube source video" />
+  return <div className="youtube-player">
+    <div className="youtube-player-frame" aria-busy={!ready && !playerError}>
+      <div ref={hostRef} aria-label="YouTube source video" />
+    </div>
+    {!ready && !playerError && <p className="muted player-loading" role="status">Loading source player…</p>}
     {playerError && <p className="error-text" role="alert">{playerError}</p>}
+    {playerError && <div className="player-actions">
+      <button type="button" className="clip-button" onClick={() => setAttempt((value) => value + 1)}>Retry player</button>
+      <a className="text-button" href={`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`} target="_blank" rel="noreferrer">Open on YouTube</a>
+    </div>}
   </div>
 }
 

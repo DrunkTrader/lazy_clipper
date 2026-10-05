@@ -95,7 +95,7 @@ def test_pipeline_persists_transcript_and_moments(tmp_path):
     init_db(database_url)
     sessions = session_factory(database_url)
     with sessions() as session:
-        project = Project(source_url="https://youtu.be/abc123")
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ")
         session.add(project)
         session.commit()
         project_id = project.id
@@ -164,7 +164,7 @@ def test_pipeline_fails_when_normalization_removes_all_transcript_data(tmp_path)
     init_db(database_url)
     sessions = session_factory(database_url)
     with sessions() as session:
-        project = Project(source_url="https://youtu.be/abc123")
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ")
         session.add(project)
         session.commit()
         project_id = project.id
@@ -191,7 +191,7 @@ def test_pipeline_keeps_metadata_when_media_fails(tmp_path):
     init_db(database_url)
     sessions = session_factory(database_url)
     with sessions() as session:
-        project = Project(source_url="https://youtu.be/abc123")
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ")
         session.add(project)
         session.commit()
         project_id = project.id
@@ -206,3 +206,39 @@ def test_pipeline_keeps_metadata_when_media_fails(tmp_path):
         assert project.video.title == "Test video"
         assert project.video.source_path is not None
         assert project.video.audio_path is None
+
+
+def test_completed_empty_analysis_is_reused_when_only_source_needs_repair(tmp_path):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'empty-analysis.db'}", storage_dir=tmp_path / "storage")
+    init_db(settings.database_url)
+    sessions = session_factory(settings.database_url)
+
+    class EmptyAnalyzer:
+        calls = 0
+
+        def analyze(self, chunks):
+            self.calls += 1
+            return []
+
+    analyzer = EmptyAnalyzer()
+    pipeline = Pipeline(settings, youtube=FakeYoutube(), media=FakeMedia(), transcriber=FakeTranscriber(),
+                        analyzer=analyzer, make_session=sessions)
+    with sessions() as session:
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ")
+        session.add(project)
+        session.commit()
+        project_id = project.id
+    pipeline.run(project_id)
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        assert project.status == "READY" and project.moments == []
+        transcript_ids = [row.id for row in project.transcript_segments]
+        Path(project.video.source_path).unlink()
+        project.status = "QUEUED"
+        session.commit()
+    pipeline.run(project_id)
+    assert analyzer.calls == 1
+    with sessions() as session:
+        project = session.get(Project, project_id)
+        assert project.status == "READY" and project.analysis_completed
+        assert [row.id for row in project.transcript_segments] == transcript_ids

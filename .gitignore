@@ -8,9 +8,11 @@ __pycache__/
 
 # Environment / secrets
 .env
+.env_backup
 .env.*
 cookies.txt
 *.cookies.txt
+/.secrets/
 
 # Generated application data
 /storage/projects/
@@ -27,3 +29,4 @@ __agent__/
 AUDIT.md
 CODEBASE_IMPLEMENTATION_PLAN.md
 PROJECT_DESCRIPTION.md
+.github/

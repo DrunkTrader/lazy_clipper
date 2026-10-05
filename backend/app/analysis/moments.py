@@ -81,6 +81,12 @@ class CandidateReview(StructuredModel):
 class ValidationResponse(StructuredModel):
     candidates: list[CandidateReview] = Field(max_length=MAX_CANDIDATES_PER_CHUNK)
 
+    def require_candidate_ids(self, proposed_ids: Iterable[int]) -> None:
+        expected = list(proposed_ids)
+        actual = [item.candidate_id for item in self.candidates]
+        if len(set(expected)) != len(expected) or len(actual) != len(expected) or set(actual) != set(expected):
+            raise ValueError("Reviews must uniquely match every proposed candidate ID")
+
 
 def calculate_composite_score(scores: CandidateScores | dict[str, float]) -> float:
     values = scores if isinstance(scores, dict) else scores.model_dump()

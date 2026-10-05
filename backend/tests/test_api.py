@@ -1,3 +1,5 @@
+from concurrent.futures import Future
+
 import pytest
 
 
@@ -14,7 +16,7 @@ def api_client(tmp_path, monkeypatch):
 
     reset_settings_cache()
     get_engine.cache_clear()
-    monkeypatch.setattr(main, "run_pipeline", lambda project_id: None)
+    monkeypatch.setattr(main.JobSupervisor, "ingest", lambda self, project_id: None)
     from fastapi.testclient import TestClient
 
     with TestClient(main.app) as client:
@@ -50,7 +52,14 @@ def test_reload_and_duplicate_submission_do_not_enqueue_again(api_client, monkey
     from backend.app.main import app
 
     submitted = []
-    monkeypatch.setattr(app.state.pipeline_executor, "submit", lambda runner, project_id: submitted.append(project_id))
+    futures = []
+    def accept(wrapped, runner, args):
+        submitted.append(args[0])
+        future = Future()
+        futures.append(future)
+        return future
+
+    monkeypatch.setattr(app.state.pipeline_executor, "submit", accept)
     first = api_client.post("/api/v1/ingest", json={"url": "https://youtu.be/dQw4w9WgXcQ?t=5"}).json()
     project_id = first["project_id"]
     for _ in range(2):
@@ -72,6 +81,7 @@ def test_reload_and_duplicate_submission_do_not_enqueue_again(api_client, monkey
         project.video = Video(youtube_id="dQw4w9WgXcQ", source_path=str(source))
         project.status = "READY"
         session.commit()
+    futures[0].set_result(None)
     assert api_client.post("/api/v1/ingest", json={"url": "https://youtu.be/dQw4w9WgXcQ"}).json()["status"] == "ready"
     assert submitted == [project_id]
     source.unlink()
@@ -111,6 +121,7 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
     response = api_client.get(base + "/clips").json()["clips"][0]
     assert "output_path" not in response
     assert response["status"] == "READY"
+    assert response["media_url"].startswith("/api/v1/") and "http" not in response["media_url"]
     assert api_client.get(response["media_url"]).content == b"test-video-bytes"
     partial = api_client.get(response["media_url"], headers={"Range": "bytes=0-3"})
     assert partial.status_code == 206
@@ -135,7 +146,14 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
     from backend.app.main import app
 
     submitted = []
-    monkeypatch.setattr(app.state.pipeline_executor, "submit", lambda runner, project_id, clip_id: submitted.append((runner, project_id, clip_id)))
+    futures = []
+    def accept(wrapped, runner, args):
+        submitted.append((runner, *args))
+        future = Future()
+        futures.append(future)
+        return future
+
+    monkeypatch.setattr(app.state.pipeline_executor, "submit", accept)
     request = {"moment_id": moment_id, "start": 0, "end": 2}
     queued = api_client.post(base + "/clips", json=request)
     assert queued.status_code == 202
@@ -150,6 +168,7 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
         session.get(Project, project_id).status = "READY"
         session.get(Clip, clip_id).status = "FAILED"
         session.commit()
+    futures[0].set_result(None)
 
     def unavailable(*args):
         raise RuntimeError("private executor diagnostic")
@@ -185,3 +204,86 @@ def test_source_video_is_not_served(api_client):
     assert response.json()["video"]["youtube_id"] == "dQw4w9WgXcQ"
     assert response.json()["video"]["media_url"] is None
     assert api_client.get(f"/api/v1/projects/{project_id}/media").status_code == 404
+
+
+def test_project_list_is_bounded_and_paginates_stably(api_client):
+    from datetime import datetime, timezone
+    from backend.app.db import session_factory
+    from backend.app.models import Project
+
+    with session_factory()() as session:
+        for index in range(31):
+            session.add(Project(source_url=f"https://youtu.be/{index:011d}", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+        session.commit()
+    first = api_client.get("/api/v1/projects").json()
+    second = api_client.get("/api/v1/projects?limit=25&offset=25").json()
+    assert len(first) == 25 and len(second) == 6
+    ids = [row["id"] for row in first + second]
+    assert len(set(ids)) == 31 and ids == sorted(ids, reverse=True)
+    assert api_client.get("/api/v1/projects?limit=101").status_code == 422
+    assert api_client.get("/api/v1/projects?offset=-1").status_code == 422
+
+
+def test_segment_only_projection_does_not_load_words_or_mutate_saved_timing(api_client):
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+    from backend.app.db import session_factory
+    from backend.app.models import Project, TranscriptSegment
+
+    words = [{"word": "Saved", "start": 0, "end": 1}]
+    with session_factory()() as session:
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ")
+        project.transcript_segments.append(TranscriptSegment(start=0, end=1, text="Saved", segment_index=0, words=words))
+        session.add(project)
+        session.commit()
+        project_id = project.id
+    statements = []
+
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", record)
+    try:
+        response = api_client.get(f"/api/v1/projects/{project_id}/transcript?include_words=false")
+    finally:
+        event.remove(Engine, "before_cursor_execute", record)
+    assert response.status_code == 200
+    segment = response.json()["segments"][0]
+    assert segment["text"] == "Saved" and "words" not in segment
+    selects = [statement for statement in statements if "FROM transcript_segments" in statement]
+    assert selects and all("transcript_segments.words" not in statement for statement in selects)
+    complete = api_client.get(f"/api/v1/projects/{project_id}/transcript?include_words=true").json()
+    assert complete["segments"][0]["words"] == words
+    with session_factory()() as session:
+        assert session.get(Project, project_id).transcript_segments[0].words == words
+
+
+def test_explicit_project_delete_quarantines_media_and_is_read_only_for_active_work(api_client):
+    from backend.app.config import get_settings
+    from backend.app.db import session_factory
+    from backend.app.models import Project, Video
+
+    with session_factory()() as session:
+        project = Project(source_url="https://youtu.be/dQw4w9WgXcQ", status="READY")
+        session.add(project)
+        session.flush()
+        root = get_settings().project_storage(project.id)
+        source = root / "source" / "video.mp4"
+        source.write_bytes(b"source")
+        project.video = Video(source_path=str(source))
+        session.commit()
+        project_id = project.id
+    response = api_client.delete(f"/api/v1/projects/{project_id}")
+    assert response.status_code == 204 and not response.content
+    assert not root.exists()
+    assert api_client.get(f"/api/v1/projects/{project_id}").status_code == 404
+
+    with session_factory()() as session:
+        active = Project(source_url="https://youtu.be/abcdefghijk", status="ANALYZING")
+        session.add(active)
+        session.commit()
+        active_id = active.id
+    blocked = api_client.delete(f"/api/v1/projects/{active_id}")
+    assert blocked.status_code == 409
+    with session_factory()() as session:
+        assert session.get(Project, active_id) is not None

@@ -33,7 +33,8 @@ def _clean_words(words: Any) -> list[dict[str, Any]] | None:
         return None
     result = []
     for word in words:
-        text = str(_value(word, "word", _value(word, "text", ""))).strip()
+        raw_text = _value(word, "word", _value(word, "text", ""))
+        text = raw_text.strip() if isinstance(raw_text, str) else ""
         start, end = _value(word, "start"), _value(word, "end")
         if not text or start is None or end is None:
             continue
@@ -41,7 +42,10 @@ def _clean_words(words: Any) -> list[dict[str, Any]] | None:
             start, end = float(start), float(end)
         except (TypeError, ValueError):
             continue
-        if math.isfinite(start) and math.isfinite(end) and end >= start:
+        if not math.isfinite(start) or not math.isfinite(end):
+            continue
+        start = max(0.0, start)
+        if end > start:
             item = {"word": text, "start": start, "end": end}
             confidence = _value(word, "confidence")
             if confidence is not None:
@@ -55,6 +59,24 @@ def _clean_words(words: Any) -> list[dict[str, Any]] | None:
     return result or None
 
 
+def require_word_alignment(segments: Iterable[Any]) -> None:
+    """Reject spoken segments with no usable alignment, independent of token counts."""
+    for segment in segments:
+        if not str(_value(segment, "text", "") or "").strip():
+            continue
+        words = _clean_words(_value(segment, "words"))
+        if not words:
+            raise ValueError("Transcript speech has no valid word timestamps")
+        try:
+            start, end = float(_value(segment, "start")), float(_value(segment, "end"))
+        except (TypeError, ValueError):
+            continue  # Normalization owns missing/invalid segment boundaries.
+        if math.isfinite(start) and math.isfinite(end) and end > start and not any(
+            word["end"] > start and word["start"] < end for word in words
+        ):
+            raise ValueError("Transcript word timestamps do not overlap their speech segment")
+
+
 def _raw_segments(raw_segments: Iterable[Any]) -> list[NormalizedSegment]:
     cleaned: list[NormalizedSegment] = []
     for item in raw_segments:
@@ -63,10 +85,41 @@ def _raw_segments(raw_segments: Iterable[Any]) -> list[NormalizedSegment]:
             start, end = float(_value(item, "start")), float(_value(item, "end"))
         except (TypeError, ValueError):
             continue
-        if not text or not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        if not text or not math.isfinite(start) or not math.isfinite(end) or end <= max(0.0, start):
             continue
         cleaned.append(NormalizedSegment(max(0.0, start), end, text, _value(item, "speaker"), _clean_words(_value(item, "words"))))
     return sorted(cleaned, key=lambda segment: (segment.start, segment.end))
+
+
+def _split_timed_segment(segment: NormalizedSegment, maximum: float) -> list[dict[str, Any]]:
+    """Use word timing as the boundary source; never match it to whitespace tokens."""
+    groups: list[list[dict[str, Any]]] = []
+    for word in sorted(segment.words or [], key=lambda item: (item["start"], item["end"])):
+        if not groups or word["end"] - groups[-1][0]["start"] > maximum:
+            groups.append([])
+        groups[-1].append(word)
+    return [NormalizedSegment(
+        group[0]["start"], max(word["end"] for word in group),
+        " ".join(word["word"] for word in group), segment.speaker, group,
+    ).as_dict() for group in groups]
+
+
+def _split_unaligned_segment(segment: NormalizedSegment, maximum: float) -> list[dict[str, Any]]:
+    """Coarse text-only analysis fallback; never manufacture caption word timing."""
+    words = segment.text.split()
+    if len(words) < 2:
+        return [segment.as_dict()]
+    duration = segment.end - segment.start
+    count = min(len(words), max(1, math.ceil(duration / maximum)))
+    result = []
+    for index in range(count):
+        left, right = round(len(words) * index / count), round(len(words) * (index + 1) / count)
+        result.append(NormalizedSegment(
+            segment.start + duration * index / count,
+            segment.start + duration * (index + 1) / count,
+            " ".join(words[left:right]), segment.speaker,
+        ).as_dict())
+    return result
 
 
 def normalize_segments(
@@ -99,27 +152,12 @@ def normalize_segments(
     result: list[dict[str, Any]] = []
     for segment in merged:
         duration = segment.end - segment.start
-        words = segment.text.split()
-        if duration <= max_segment_duration or len(words) < 2:
+        if duration <= max_segment_duration:
             result.append(segment.as_dict())
-            continue
-        count = max(1, math.ceil(duration / max_segment_duration))
-        # Real word timestamps are preferred; proportional split is deliberately
-        # coarse and only used so very long unaligned transcript data remains
-        # usable for LLM chunking.
-        if segment.words and len(segment.words) == len(words):
-            for index in range(count):
-                group = segment.words[round(len(segment.words) * index / count):round(len(segment.words) * (index + 1) / count)]
-                if not group:
-                    continue
-                result.append({"start": group[0]["start"], "end": group[-1]["end"], "text": " ".join(word["word"] for word in group), "words": group})
+        elif segment.words:
+            result.extend(_split_timed_segment(segment, max_segment_duration))
         else:
-            for index in range(count):
-                left, right = round(len(words) * index / count), round(len(words) * (index + 1) / count)
-                left, right = left, max(left + 1, right)
-                start = segment.start + duration * index / count
-                end = segment.start + duration * (index + 1) / count
-                result.append({"start": start, "end": end, "text": " ".join(words[left:right]), **({"speaker": segment.speaker} if segment.speaker else {})})
+            result.extend(_split_unaligned_segment(segment, max_segment_duration))
     return result
 
 
