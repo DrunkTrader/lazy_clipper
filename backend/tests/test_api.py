@@ -126,6 +126,8 @@ def test_clips_are_scoped_playable_downloadable_and_do_not_expose_paths(api_clie
     partial = api_client.get(response["media_url"], headers={"Range": "bytes=0-3"})
     assert partial.status_code == 206
     assert partial.content == b"test"
+    unsatisfiable = api_client.get(response["media_url"], headers={"Range": "bytes=999-1000"})
+    assert unsatisfiable.status_code == 416
     download = api_client.get(response["download_url"])
     assert download.status_code == 200
     assert download.headers["content-disposition"].startswith("attachment;")

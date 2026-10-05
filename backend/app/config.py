@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     max_clip_seconds: float = Field(default=180, gt=0, le=180, allow_inf_nan=False)
     ingestion_timeout_seconds: float = Field(default=7200, gt=0, allow_inf_nan=False)
     clip_timeout_seconds: float = Field(default=960, gt=0, allow_inf_nan=False)
+    media_timeout_margin_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     submission_lock_timeout_seconds: float = Field(default=1, gt=0, le=5, allow_inf_nan=False)
     database_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
     database_statement_timeout_seconds: int = Field(default=10, ge=1, le=60)

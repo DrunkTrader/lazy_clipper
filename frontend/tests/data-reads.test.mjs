@@ -10,7 +10,13 @@ const { App } = await import(await bundleEntry('tests/app-entry.ts'))
 
 async function mount(t, search, fetch) {
   const original = globalThis.window
-  globalThis.window = { location: { search, pathname: '/' } }
+  globalThis.window = {
+    location: { search, pathname: '/' },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+  }
   t.mock.method(globalThis, 'fetch', fetch)
   let tree
   t.after(async () => {
@@ -51,6 +57,26 @@ test('clip submission/completion refreshes mutable details without rereading sav
   assert.ok(contentReads().find((url) => url.includes('/transcript?include_words=false')))
 })
 
+test('clip range controls send an adjusted range to the existing clip endpoint', async (t) => {
+  let payload
+  const tree = await mount(t, '?project_id=p', async (url, init = {}) => {
+    const path = new URL(url, 'http://test.local').pathname
+    if (init.method === 'POST') {
+      payload = JSON.parse(init.body)
+      return new Response(JSON.stringify({ ...clip, start: payload.start, end: payload.end }), { status: 202 })
+    }
+    return new Response(JSON.stringify(projectResponse(url)))
+  })
+  const inputs = tree.root.findAllByType('input')
+  const start = inputs.find((node) => node.props['aria-label'] === 'Clip start for Moment 0')
+  const end = inputs.find((node) => node.props['aria-label'] === 'Clip end for Moment 0')
+  start.props.onChange({ target: { value: '3.5' } })
+  end.props.onChange({ target: { value: '12.5' } })
+  const button = tree.root.findAllByType('button').find((node) => node.children.join('') === 'Create Clip')
+  await act(async () => { button.props.onClick(); await setImmediate() })
+  assert.deepEqual(payload, { moment_id: 'm0', start: 3.5, end: 12.5 })
+})
+
 test('ingestion completion still reloads newly produced transcript/moments', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let status = 'ANALYZING'
@@ -86,4 +112,68 @@ test('saved-project pagination preserves the current page when loading more fail
   await act(async () => { more().props.onClick(); await setImmediate() })
   assert.equal(saved().length, 31)
   assert.equal(more(), undefined)
+})
+
+test('deleting the open project confirms, sends DELETE, and clears local workspace state', async (t) => {
+  const originalWindow = globalThis.window
+  let deleted = false
+  let replacedPath = null
+  globalThis.window = {
+    location: { search: '?project_id=p', pathname: '/' },
+    history: { replaceState: (_, __, path) => { replacedPath = path } },
+    confirm: () => true,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+  }
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    const path = new URL(url, 'http://test.local').pathname
+    if (init.method === 'DELETE') {
+      deleted = true
+      return new Response(null, { status: 204 })
+    }
+    if (path.endsWith('/projects') && deleted) return new Response('[]')
+    return new Response(JSON.stringify(projectResponse(url)))
+  })
+  let tree
+  t.after(async () => {
+    if (tree) await act(async () => tree.unmount())
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  })
+  await act(async () => { tree = create(React.createElement(App)); await setImmediate() })
+  const button = tree.root.findByProps({ 'aria-label': 'Delete project' })
+  await act(async () => { button.props.onClick(); await setImmediate() })
+  assert.equal(deleted, true)
+  assert.equal(replacedPath, '/')
+  assert.equal(tree.root.findAllByProps({ className: 'saved-project-list' })[0].findAllByType('li').length, 0)
+  assert.equal(tree.root.findAllByProps({ className: 'workspace' }).length, 0)
+})
+
+test('cancelling project deletion does not send a request', async (t) => {
+  const originalWindow = globalThis.window
+  let deletes = 0
+  globalThis.window = {
+    location: { search: '?project_id=p', pathname: '/' },
+    history: { replaceState() {} },
+    confirm: () => false,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+  }
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    if (init.method === 'DELETE') deletes += 1
+    return new Response(JSON.stringify(projectResponse(url)))
+  })
+  let tree
+  t.after(async () => {
+    if (tree) await act(async () => tree.unmount())
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  })
+  await act(async () => { tree = create(React.createElement(App)); await setImmediate() })
+  await act(async () => { tree.root.findByProps({ 'aria-label': 'Delete project' }).props.onClick(); await setImmediate() })
+  assert.equal(deletes, 0)
 })

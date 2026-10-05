@@ -28,5 +28,5 @@ __agent__/
 # Generated audit / planning artifacts
 AUDIT.md
 CODEBASE_IMPLEMENTATION_PLAN.md
+CODE_REVIEW.md
 PROJECT_DESCRIPTION.md
-.github/

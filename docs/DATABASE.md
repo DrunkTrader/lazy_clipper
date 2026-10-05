@@ -1,6 +1,6 @@
 # Database Maintenance
 
-LazyClipper stores metadata in PostgreSQL and media under `storage/projects/`. Back up and restore both together. Run the Compose commands below from the repository root. For schema and persistence design, see [Architecture](../ARCHITECTURE.md#persistent-state-and-storage).
+LazyClipper stores metadata in PostgreSQL and media under `storage/projects/`. Back up and restore both together. Run the Compose commands below from the repository root. For schema and persistence design, see [Architecture](ARCHITECTURE.md#persistent-state-and-storage).
 
 ## Fresh installations and credentials
 
@@ -84,4 +84,4 @@ Project IDs, child rows, media references, source artifacts, and activity timest
 
 PostgreSQL upgrades are transactional; SQLite upgrades explicitly begin a transaction before DDL. Repeating a completed upgrade is harmless. Downgrades are refused. Roll back by restoring the protected pre-upgrade metadata/globals/media set with its matching application version.
 
-Continue running one API process per database/storage directory. See [Deployment](DEPLOYMENT.md#runtime-policies) and [Architecture](../ARCHITECTURE.md#execution-and-startup) for execution ownership.
+Continue running one API process per database/storage directory. See [Deployment](DEPLOYMENT.md#runtime-policies) and [Architecture](ARCHITECTURE.md#execution-and-startup) for execution ownership.

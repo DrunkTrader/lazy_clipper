@@ -9,7 +9,7 @@ LazyClipper turns a YouTube video into persisted, timestamp-grounded moment sugg
 
 The original video plays through YouTube's IFrame Player API. Generated clips play through project-scoped backend media routes. Ingestion completes with saved moments; clip rendering begins only after an explicit clip request.
 
-This document describes the implemented architecture. See [README.md](README.md) for setup, configuration, and usage, and [AGENTS.md](AGENTS.md) for development invariants and verification guidance.
+This document describes the implemented architecture. See [README.md](../README.md) for setup, configuration, and usage, and [AGENTS.md](../AGENTS.md) for development invariants and verification guidance.
 
 ## Runtime topology
 
@@ -54,7 +54,7 @@ flowchart LR
 
 ### Deployment and dependencies
 
-The stack in [docker-compose.yml](docker-compose.yml) contains three services:
+The stack in [docker-compose.yml](../docker-compose.yml) contains three services:
 
 | Service | Runtime and role | Default host port | Persistent data |
 | --- | --- | --- | --- |
@@ -64,12 +64,12 @@ The stack in [docker-compose.yml](docker-compose.yml) contains three services:
 
 The backend image provides the processing dependencies:
 
-- **`yt-dlp` + `yt-dlp-ejs` + Node 22:** YouTube metadata, MP4 download, and JavaScript challenge solving. Python package pins live in [pyproject.toml](pyproject.toml).
+- **`yt-dlp` + `yt-dlp-ejs` + Node 22:** YouTube metadata, MP4 download, and JavaScript challenge solving. Python package pins live in [pyproject.toml](../pyproject.toml).
 - **`whisper-timestamped`:** full-source speech transcription with word start/end times, using Whisper/PyTorch. `WHISPER_MODEL` and `WHISPER_DEVICE` control the model and device; the default device is CPU.
 - **FFmpeg with libass:** audio extraction, vertical crop/encoding, and ASS subtitle burn-in. `ffprobe` is also installed for media inspection and verification.
 - **OpenAI Python SDK:** calls the configured external gateway using `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`, with bounded timeouts/retries.
 
-The [backend Dockerfile](backend/Dockerfile) caches dependency installation separately from application source. Its non-x86 build pins the compatible CPU Torch/Torchaudio wheels. The [frontend Dockerfile](frontend/Dockerfile) uses `npm ci` and a TypeScript/Vite build before copying assets into Nginx.
+The [backend Dockerfile](../backend/Dockerfile) caches dependency installation separately from application source. Its non-x86 build pins the compatible CPU Torch/Torchaudio wheels. The [frontend Dockerfile](../frontend/Dockerfile) uses `npm ci` and a TypeScript/Vite build before copying assets into Nginx.
 
 `VITE_API_BASE_URL` is embedded at frontend build time. An empty value selects the same-origin Nginx proxy; a separate API origin requires a rebuild. Local Vite development uses the API client's `http://localhost:8000` default when the variable is unset.
 
@@ -79,12 +79,12 @@ The private frontend binding and tailnet policy define the trusted single-user a
 
 ### Execution and startup
 
-- [main.py](backend/app/main.py) initializes database tables, creates `ThreadPoolExecutor(max_workers=2)`, and registers separate ingestion and single-clip runners.
+- [main.py](../backend/app/main.py) initializes database tables, creates `ThreadPoolExecutor(max_workers=2)`, and registers separate ingestion and single-clip runners.
 - Startup validates transcript-window relationships and required non-placeholder LLM configuration before database initialization, executor/admission creation, or expensive work. It validates syntax/presence only and makes no provider request.
 - POST routes reserve bounded capacity before persisting a queued request and submitting its IDs to the executor. Two active jobs plus four waiting is the default; excess requests return retryable HTTP `429` without changing job records. `GET /api/v1/processing` exposes active/queued/reserved counts, available capacity, and oldest queued age.
 - Each executor thread supervises a Linux process group with a tiny parent-death guard and a pipeline child using new database sessions. Whole-job deadlines include download/model initialization/transcription/analysis. Timeout/shutdown kills descendants, reaps the direct child and confirms the group stopped before scoped failure persistence. An unconfirmed kill or failed failure-persistence disables admission. The guard kills its group on abrupt API-parent death without depending on model code releasing Python's GIL. This is local execution isolation, not a separate worker service or queue.
 - A process-local submission lock with a bounded acquisition wait serializes duplicate checks and submissions. It coordinates the current single API process; it is not a distributed lock. PostgreSQL connect/pool, statement and lock deadlines are explicit, with TCP dead-peer detection. Settings/source/clip policies are documented in README.
-- Database stages are persisted, but executor tasks are in memory. Before creating the executor, [services/recovery.py](backend/app/services/recovery.py) atomically changes orphan ingestion jobs and active clips to retryable `FAILED` states with `PROCESSING_INTERRUPTED`. Rendering projects return to `READY`, while successful clips and saved artifacts are preserved. Recovery does not enqueue jobs or change GET semantics. A recovery transaction failure aborts startup. This policy requires one API process and the old process fully stopped before replacement; it is not a distributed lease or live-job timeout.
+- Database stages are persisted, but executor tasks are in memory. Before creating the executor, [services/recovery.py](../backend/app/services/recovery.py) atomically changes orphan ingestion jobs and active clips to retryable `FAILED` states with `PROCESSING_INTERRUPTED`. Rendering projects return to `READY`, while successful clips and saved artifacts are preserved. Recovery does not enqueue jobs or change GET semantics. A recovery transaction failure aborts startup. This policy requires one API process and the old process fully stopped before replacement; it is not a distributed lease or live-job timeout.
 - PostgreSQL must become healthy before the API starts; the frontend waits for API readiness. `/health` remains a constant liveness response. `/ready` checks a local database `SELECT 1` and accepting admission state, without paid/provider calls. Compose's `unless-stopped` policy restarts services after process/host failures; startup recovery then reconciles abandoned jobs before accepting work.
 - Uvicorn and Nginx routine access logs are disabled. Application stage events and redacted failure diagnostics remain in backend/container logs.
 
@@ -133,17 +133,17 @@ Reuse uses existing artifacts/rows plus the explicit analysis-completed marker, 
 
 ### Timestamp-grounded LLM analysis
 
-[analysis/transcript.py](backend/app/analysis/transcript.py) cleans transcript data, merges short adjacent segments, splits long segments, and builds overlapping windows. Defaults are 300-second windows with 45 seconds of overlap. Word timestamps are the timing source for captions; proportional segment boundaries used for unaligned analysis data are not a replacement for word alignment.
+[analysis/transcript.py](../backend/app/analysis/transcript.py) cleans transcript data, merges short adjacent segments, splits long segments, and builds overlapping windows. Defaults are 300-second windows with 45 seconds of overlap. Word timestamps are the timing source for captions; proportional segment boundaries used for unaligned analysis data are not a replacement for word alignment.
 
-[services/llm.py](backend/app/services/llm.py) performs detection and review per chunk:
+[services/llm.py](../backend/app/services/llm.py) performs detection and review per chunk:
 
 1. The detection response identifies candidate start/end **segment indexes**.
 2. The application resolves those indexes to transcript timestamps and original segment references. Invalid indexes and candidates outside the 15–180 second duration bounds are discarded.
 3. Grounded candidates are sent for a second LLM review, which accepts/rejects them and supplies six scores: hook, clarity, standalone value, novelty, emotional interest, and payoff.
 4. Strict Pydantic schemas validate the responses. Malformed JSON/schema output gets one correction attempt; transport/provider failures use the SDK's configured bounded retries.
-5. [analysis/moments.py](backend/app/analysis/moments.py) computes weighted composite scores and keeps higher-ranked candidates when intervals overlap by at least 50% of the shorter interval. The analyzer limits the result to `MAX_MOMENTS` before the pipeline persists it.
+5. [analysis/moments.py](../backend/app/analysis/moments.py) computes weighted composite scores and keeps higher-ranked candidates when intervals overlap by at least 50% of the shorter interval. The analyzer limits the result to `MAX_MOMENTS` before the pipeline persists it.
 
-Detection/review schemas allow up to five candidates per chunk. Prompt templates live in [backend/app/services/prompts](backend/app/services/prompts).
+Detection/review schemas allow up to five candidates per chunk. Prompt templates live in [backend/app/services/prompts](../backend/app/services/prompts).
 
 ## Workflow 2: render one selected clip
 
@@ -183,7 +183,7 @@ The pipeline retains an explicit legacy/backfill `render_clips()` helper. Normal
 
 ### Caption generation and highlighting
 
-[services/captions.py](backend/app/services/captions.py) uses standard-library Python to generate ASS subtitles from stored word data:
+[services/captions.py](../backend/app/services/captions.py) uses standard-library Python to generate ASS subtitles from stored word data:
 
 - `select_words()` selects overlapping words and clamps their start/end times to the clip range.
 - `build_ass()` converts source timestamps to clip-relative times and emits one dialogue event per spoken word, with a sliding window of up to four words.
@@ -197,7 +197,7 @@ The pipeline retains an explicit legacy/backfill `render_clips()` helper. Normal
 
 ### Relational model
 
-[models.py](backend/app/models.py) defines the SQLAlchemy entities:
+[models.py](../backend/app/models.py) defines the SQLAlchemy entities:
 
 | Entity | Relationship | Persisted data |
 | --- | --- | --- |
@@ -207,7 +207,7 @@ The pipeline retains an explicit legacy/backfill `render_clips()` helper. Normal
 | `Moment` | Many per project | Title, description, reason, source timestamps, rank, composite score, dimension scores, source segment indexes |
 | `Clip` | Belongs to project and moment; unique `moment_id` | Requested timestamps, clip status, backend-only output path, safe error message |
 
-PostgreSQL is the source of truth for project state and structured results. API requests and pipeline tasks use separate synchronous SQLAlchemy sessions. [db.py](backend/app/db.py) caches engines, enables connection pre-ping, and hides SQL parameters in exception formatting.
+PostgreSQL is the source of truth for project state and structured results. API requests and pipeline tasks use separate synchronous SQLAlchemy sessions. [db.py](../backend/app/db.py) caches engines, enables connection pre-ping, and hides SQL parameters in exception formatting.
 
 Startup calls `migrations.ensure_schema()`: fresh databases get the current schema and revision, while existing databases must already have the expected revision/critical definitions. Explicit `python -m backend.app.migrations upgrade` performs transactional, versioned upgrades with the API stopped and a verified coordinated backup. Revision 1 canonicalizes legacy source identity, refuses ambiguous/invalid data, adds uniqueness/lookup indexes and backfills `analysis_completed` while retaining child rows/files. Normal runtime never silently alters an existing schema; see README for the table-owner maintenance connection.
 
@@ -247,7 +247,7 @@ Persisted stages can be skipped during retries. Failure persistence is best-effo
 
 ### API surface
 
-All project routes are registered under `/api/v1` in [api/routes.py](backend/app/api/routes.py).
+All project routes are registered under `/api/v1` in [api/routes.py](../backend/app/api/routes.py).
 
 | Method and path | Responsibility |
 | --- | --- |
@@ -269,13 +269,13 @@ Opening a saved project through `?project_id=...`, refreshing, and previewing me
 
 ### Workspace and polling
 
-- [App.tsx](frontend/src/App.tsx) owns form/selection state, saved project navigation, metadata, transcript, moments, clip actions, and playback.
-- [api.ts](frontend/src/api.ts) owns typed requests, URL construction, response parsing, and a 30-second request timeout.
-- [projectUpdates.ts](frontend/src/projectUpdates.ts) drives a single status poll loop and passes observed status into refresh boundaries. The workspace loads all details initially, reuses successfully loaded transcript/moments during clip-only refreshes, and invalidates that per-project cache on ingestion transitions/resubmission. During processing, only `/status` is polled, with a four-second delay between completed cycles.
+- [App.tsx](../frontend/src/App.tsx) owns form/selection state, saved project navigation, metadata, transcript, moments, clip actions, and playback.
+- [api.ts](../frontend/src/api.ts) owns typed requests, URL construction, response parsing, and a 30-second request timeout.
+- [projectUpdates.ts](../frontend/src/projectUpdates.ts) drives a single status poll loop and passes observed status into refresh boundaries. The workspace loads all details initially, reuses successfully loaded transcript/moments during clip-only refreshes, and invalidates that per-project cache on ingestion transitions/resubmission. During processing, only `/status` is polled, with a four-second delay between completed cycles.
 - Saved projects load 25 at a time with an explicit append/retry action. Workspace transcript reads use the segment-only SQL projection; word timings remain persisted for rendering and available through the full transcript response.
-- Polling stops at `READY`/`FAILED`. Explicit clip creation or retry restarts state loading and polling, so completion refreshes the saved clip and its preview/download links. POST requests are never retried automatically.
+- Polling stops at `READY`/`FAILED`. Explicit clip creation or retry restarts state loading and polling, so completion refreshes the saved clip and its preview/download links. Numeric clip start/end controls reuse the same explicit clip POST and backend validation. A non-terminal status that remains unchanged for ten minutes triggers frontend-only stale guidance and a manual status refresh action; it never submits work automatically. POST requests are never retried automatically.
 - The original video uses the YouTube IFrame Player API and its video ID. Selecting a moment or transcript segment seeks that player. Generated clips use HTML video playback against the scoped API URL.
-- [errors.ts](frontend/src/errors.ts) maps stage/client error codes to local, application-owned messages. Network failures/timeouts display `Unable to reach the server. Please try again.`
+- [errors.ts](../frontend/src/errors.ts) maps stage/client error codes to local, application-owned messages. Network failures/timeouts display `Unable to reach the server. Please try again.`
 
 ## Public errors and internal diagnostics
 
@@ -283,11 +283,11 @@ Error handling spans the pipeline, API serialization, exception handlers, and fr
 
 | Module | Responsibility |
 | --- | --- |
-| [backend/app/errors.py](backend/app/errors.py) | Public stage messages, safe client-error allowlist, database exception classification, and legacy stored-error classification |
-| [backend/app/api/errors.py](backend/app/api/errors.py) | Sanitize HTTP, request validation, database, and unhandled exceptions into public error envelopes |
-| [backend/app/schemas.py](backend/app/schemas.py) | API contracts and sanitization of failed project/clip rows, including legacy raw errors |
-| [backend/app/logging.py](backend/app/logging.py) | Stage events, project/clip context, redacted server diagnostics, and concise expected-client rejection events |
-| [frontend/src/errors.ts](frontend/src/errors.ts) | Safe local error display for API failures, proxy responses, and legacy/malformed error text |
+| [backend/app/errors.py](../backend/app/errors.py) | Public stage messages, safe client-error allowlist, database exception classification, and legacy stored-error classification |
+| [backend/app/api/errors.py](../backend/app/api/errors.py) | Sanitize HTTP, request validation, database, and unhandled exceptions into public error envelopes |
+| [backend/app/schemas.py](../backend/app/schemas.py) | API contracts and sanitization of failed project/clip rows, including legacy raw errors |
+| [backend/app/logging.py](../backend/app/logging.py) | Stage events, project/clip context, redacted server diagnostics, and concise expected-client rejection events |
+| [frontend/src/errors.ts](../frontend/src/errors.ts) | Safe local error display for API failures, proxy responses, and legacy/malformed error text |
 
 A persisted analysis failure includes:
 
@@ -316,19 +316,19 @@ These relative links follow the current repository rather than a hard-coded repo
 
 | Area | Source | Main responsibility |
 | --- | --- | --- |
-| Application lifecycle | [backend/app/main.py](backend/app/main.py) | FastAPI setup, database initialization, error/logging setup, two-worker executor |
-| REST boundary | [backend/app/api/routes.py](backend/app/api/routes.py) | Submission/reuse rules, persisted reads, scoped clip media |
-| Orchestration | [backend/app/services/pipeline.py](backend/app/services/pipeline.py) | Reusable stages, single-clip render, status persistence, failure isolation |
-| Runtime configuration | [backend/app/config.py](backend/app/config.py) | Environment settings, cached settings, project directory creation |
-| YouTube ingestion | [backend/app/services/youtube.py](backend/app/services/youtube.py) | URL validation, metadata, download, yt-dlp/EJS/cookie setup |
-| Media processing | [backend/app/services/media.py](backend/app/services/media.py) | Bounded FFmpeg subprocesses, audio extraction, captioned vertical MP4 encoding |
-| Transcription | [backend/app/services/transcription.py](backend/app/services/transcription.py) | Lazy Whisper model loading and word-timestamped full-source transcription |
-| Transcript preparation | [backend/app/analysis/transcript.py](backend/app/analysis/transcript.py) | Normalization and overlapping analysis windows |
-| LLM analysis | [backend/app/services/llm.py](backend/app/services/llm.py) | Detection, timestamp grounding, review, schema correction, candidate selection |
-| Moment rules | [backend/app/analysis/moments.py](backend/app/analysis/moments.py) | Structured schemas, weighted scoring, overlap deduplication |
-| Captions | [backend/app/services/captions.py](backend/app/services/captions.py) | Stored-word selection and styled ASS event generation |
-| Database | [backend/app/db.py](backend/app/db.py), [backend/app/models.py](backend/app/models.py) | Sessions, table creation, persistent entities and relationships |
-| Frontend proxy | [frontend/nginx.conf](frontend/nginx.conf) | Static assets, Docker API proxy, unbuffered clip responses |
+| Application lifecycle | [backend/app/main.py](../backend/app/main.py) | FastAPI setup, database initialization, error/logging setup, two-worker executor |
+| REST boundary | [backend/app/api/routes.py](../backend/app/api/routes.py) | Submission/reuse rules, persisted reads, scoped clip media |
+| Orchestration | [backend/app/services/pipeline.py](../backend/app/services/pipeline.py) | Reusable stages, single-clip render, status persistence, failure isolation |
+| Runtime configuration | [backend/app/config.py](../backend/app/config.py) | Environment settings, cached settings, project directory creation |
+| YouTube ingestion | [backend/app/services/youtube.py](../backend/app/services/youtube.py) | URL validation, metadata, download, yt-dlp/EJS/cookie setup |
+| Media processing | [backend/app/services/media.py](../backend/app/services/media.py) | Bounded FFmpeg subprocesses, audio extraction, captioned vertical MP4 encoding |
+| Transcription | [backend/app/services/transcription.py](../backend/app/services/transcription.py) | Lazy Whisper model loading and word-timestamped full-source transcription |
+| Transcript preparation | [backend/app/analysis/transcript.py](../backend/app/analysis/transcript.py) | Normalization and overlapping analysis windows |
+| LLM analysis | [backend/app/services/llm.py](../backend/app/services/llm.py) | Detection, timestamp grounding, review, schema correction, candidate selection |
+| Moment rules | [backend/app/analysis/moments.py](../backend/app/analysis/moments.py) | Structured schemas, weighted scoring, overlap deduplication |
+| Captions | [backend/app/services/captions.py](../backend/app/services/captions.py) | Stored-word selection and styled ASS event generation |
+| Database | [backend/app/db.py](../backend/app/db.py), [backend/app/models.py](../backend/app/models.py) | Sessions, table creation, persistent entities and relationships |
+| Frontend proxy | [frontend/nginx.conf](../frontend/nginx.conf) | Static assets, Docker API proxy, unbuffered clip responses |
 
 ## Verification
 
@@ -348,8 +348,8 @@ npm test
 npm run build
 ```
 
-[Backend tests](backend/tests) use temporary SQLite databases and mocked external services for deterministic checks of API contracts, saved-stage reuse, clip isolation, captions, and error redaction. The real MP4 smoke test uses FFmpeg/ffprobe when available. [Frontend tests](frontend/tests) use Node's test runner and the existing Vite toolchain for request/error boundaries and polling behavior.
+[Backend tests](../backend/tests) use temporary SQLite databases and mocked external services for deterministic checks of API contracts, saved-stage reuse, clip isolation, captions, and error redaction. The real MP4 smoke test uses FFmpeg/ffprobe when available. [Frontend tests](../frontend/tests) use Node's test runner and the existing Vite toolchain for request/error boundaries and polling behavior.
 
 For caption changes, run `pytest -q backend/tests/test_captions.py backend/tests/test_pipeline.py backend/tests/test_clipping.py` and check `ffmpeg -hide_banner -h filter=subtitles` (or `docker compose exec api ffmpeg -hide_banner -h filter=subtitles`). Native subtitle support must be present for actual rendering.
 
-Real YouTube, Whisper, and LLM integration checks require the configured services and model dependencies described in [README.md](README.md). The product remains a single-process MVP with explicit user-requested clip generation; advanced editing, intelligent reframing, publishing, and social integrations are outside its current scope.
+Real YouTube, Whisper, and LLM integration checks require the configured services and model dependencies described in [README.md](../README.md). The product remains a single-process MVP with explicit user-requested clip generation; advanced editing, intelligent reframing, publishing, and social integrations are outside its current scope.
