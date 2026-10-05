@@ -47,7 +47,7 @@
 - Run a focused backend file with `pytest -q backend/tests/test_api.py`, or a single test with `pytest -q backend/tests/test_api.py::test_ingest_persists_project_and_exposes_status`.
 - Backend tests use temporary SQLite databases and mocked external services; the real vertical MP4 test is skipped unless both `ffmpeg` and `ffprobe` are available.
 - For caption changes, run `pytest -q backend/tests/test_captions.py backend/tests/test_pipeline.py backend/tests/test_clipping.py`. Verify native subtitle support with `ffmpeg -hide_banner -h filter=subtitles` (or prefix with `docker compose exec api` for the container); a present FFmpeg binary alone does not guarantee libass support.
-- Check the frontend separately with `cd frontend && npm test && npm run build`; tests use Node 22+ and the existing Vite toolchain, and the build runs `tsc -b` followed by `vite build`. There is no frontend lint script.
+- Check the frontend separately with `cd frontend && npm test && npm run build`; tests use Node 22+ and the existing Vite toolchain, and the build runs non-emitting TypeScript checks followed by `vite build`. There is no frontend lint script.
 
 ## Product invariants
 

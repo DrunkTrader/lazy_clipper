@@ -1,6 +1,6 @@
 # Deployment
 
-Use the [Docker quick start](../README.md#quick-start--docker) for installation. Run commands here from the repository root. Component topology and implementation details live in [Architecture](../ARCHITECTURE.md#runtime-topology).
+Use the [Docker quick start](../README.md#quick-start--docker) for installation. Run commands here from the repository root. Component topology and implementation details live in [Architecture](ARCHITECTURE.md#runtime-topology).
 
 ## Private-network access
 
@@ -44,15 +44,18 @@ Settings are defined in [`.env.example`](../.env.example) and passed into the AP
 | `MAX_SOURCE_SECONDS` | 7200 | Known, finite, positive source duration required before download and on saved-stage retries |
 | `MAX_CLIP_SECONDS` | 180 | Maximum requested clip range; may be lowered, not raised above 180 |
 | `INGESTION_TIMEOUT_SECONDS` | 7200 | Running ingestion budget, including download, model loading, transcription, analysis, and persistence |
-| `CLIP_TIMEOUT_SECONDS` | 960 | Running clip budget; FFmpeg also has a 900-second deadline |
+| `CLIP_TIMEOUT_SECONDS` | 960 | Running clip budget; FFmpeg derives an inner deadline using the margin below |
+| `MEDIA_TIMEOUT_MARGIN_SECONDS` | 30 | Reserved inside each job budget so FFmpeg reports its own timeout before the supervisor deadline |
 | `SUBMISSION_LOCK_TIMEOUT_SECONDS` | 1 | Maximum wait to enter serialized submission |
 | `DATABASE_CONNECT_TIMEOUT_SECONDS` | 5 | PostgreSQL connection and pool-checkout deadline |
 | `DATABASE_STATEMENT_TIMEOUT_SECONDS` | 10 | PostgreSQL statement deadline |
 | `DATABASE_LOCK_TIMEOUT_SECONDS` | 3 | PostgreSQL lock wait; SQLite busy timeout |
 
-Execution budgets exclude queue wait. Transcription defaults to `small` / `cpu`; transcript windows default to 300 seconds with 45 seconds overlap. Overlap must remain smaller than the chunk window. LLM controls include temperature 0.2, 4000 maximum tokens, a 120-second timeout, and two transport retries. See `.env.example` for those settings and `MAX_MOMENTS`.
+Execution budgets exclude queue wait. FFmpeg derives its audio-extraction and clip-render subprocess deadlines from the corresponding job budget minus `MEDIA_TIMEOUT_MARGIN_SECONDS`; the outer process supervisor still owns and kills the complete job group at the configured total deadline. Transcription defaults to `small` / `cpu`; transcript windows default to 300 seconds with 45 seconds overlap. Overlap must remain smaller than the chunk window. LLM controls include temperature 0.2, 4000 maximum tokens, a 120-second timeout, and two transport retries. See `.env.example` for those settings and `MAX_MOMENTS`.
 
-Storage defaults to a 50 GiB project-tree budget, a 1 GiB free-space reserve, and 1 GiB per admitted job. These are admission checks, not hard quotas for out-of-band writes. See [Architecture](../ARCHITECTURE.md#filesystem-artifacts) for scoped deletion and atomic artifacts.
+The supervisor passes only runtime plumbing such as `PATH`, cache/home, proxy, and certificate variables to the job guard. Database URLs/password files, LLM credentials, cookie paths, and other application settings remain in the private settings snapshot on stdin rather than the descendant environment.
+
+Storage defaults to a 50 GiB project-tree budget, a 1 GiB free-space reserve, and 1 GiB per admitted job. These are admission checks, not hard quotas for out-of-band writes. See [Architecture](ARCHITECTURE.md#filesystem-artifacts) for scoped deletion and atomic artifacts.
 
 ## Startup and monitoring
 
@@ -74,4 +77,4 @@ Routine Uvicorn/Nginx access logs are disabled. Application logs retain project/
 - The frontend uses `npm ci`, TypeScript/Vite, and a static Nginx runtime; startup does not run npm or require host `node_modules`.
 - The first build downloads large dependencies. The first transcription downloads its model into the reusable `whisper_cache` volume. Normal updates should reuse caches rather than use `--no-cache`.
 
-Update dependency constraints deliberately. Rebuild and check `pip check`, imports, model loading, and synthetic/real media behavior; see [runtime verification](TROUBLESHOOTING.md#container-runtime-verification). Caption implementation and rendering details belong in [Architecture](../ARCHITECTURE.md#caption-generation-and-highlighting).
+Update dependency constraints deliberately. Rebuild and check `pip check`, imports, model loading, and synthetic/real media behavior; see [runtime verification](TROUBLESHOOTING.md#container-runtime-verification). Caption implementation and rendering details belong in [Architecture](ARCHITECTURE.md#caption-generation-and-highlighting).

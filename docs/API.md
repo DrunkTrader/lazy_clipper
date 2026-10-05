@@ -34,7 +34,7 @@ curl "$BASE_URL/api/v1/projects/PROJECT_ID/moments"
 curl "$BASE_URL/api/v1/projects/PROJECT_ID/clips"
 ```
 
-Status follows `QUEUED → INGESTING → TRANSCRIBING → ANALYZING → READY`, or FAILED. A requested clip temporarily puts its project in RENDERING, then returns it to READY. Clip statuses are QUEUED, RENDERING, READY, and FAILED. Failure stages and safe error fields are described in [Architecture](../ARCHITECTURE.md#public-errors-and-internal-diagnostics).
+Status follows `QUEUED → INGESTING → TRANSCRIBING → ANALYZING → READY`, or FAILED. A requested clip temporarily puts its project in RENDERING, then returns it to READY. Clip statuses are QUEUED, RENDERING, READY, and FAILED. Failure stages and safe error fields are described in [Architecture](ARCHITECTURE.md#public-errors-and-internal-diagnostics).
 
 ## Pagination and transcript projection
 
@@ -44,7 +44,7 @@ Status follows `QUEUED → INGESTING → TRANSCRIBING → ANALYZING → READY`, 
 
 ## Render and download clips
 
-`POST /api/v1/projects/PROJECT_ID/clips` accepts `moment_id`, `start`, and `end` from a saved moment. It queues only that requested clip, reuses a matching available READY output, and retries failed/missing outputs explicitly. For example, after replacing the IDs and times with saved values:
+`POST /api/v1/projects/PROJECT_ID/clips` accepts `moment_id`, `start`, and `end` from a saved moment. The workspace exposes these as editable numeric controls; the backend remains the authority for range, source-duration, and maximum-duration validation. It queues only that requested clip, reuses a matching available READY output, and retries failed/missing outputs explicitly. For example, after replacing the IDs and times with saved values:
 
 ```bash
 curl -X POST "$BASE_URL/api/v1/projects/PROJECT_ID/clips" \
@@ -74,9 +74,11 @@ The processing snapshot includes `workers`, `capacity`, `active`, `queued`, `res
 curl -X DELETE "$BASE_URL/api/v1/projects/PROJECT_ID"
 ```
 
+The workspace's **Delete project** action uses this endpoint after an explicit browser confirmation, removes the project from the local saved-project list, and clears the open project without reloading the application.
+
 ## Errors and workspace behavior
 
-Persisted project/clip failures use uppercase FAILED; HTTP error envelopes use lowercase `failed`. Failures expose safe `failed_stage`, structured `error`, and backward-compatible `error_message` fields. New errors store public messages; legacy raw errors are sanitized on read without rewriting saved rows. See the [error contract](../ARCHITECTURE.md#public-errors-and-internal-diagnostics) for an example and diagnostic policy.
+Persisted project/clip failures use uppercase FAILED; HTTP error envelopes use lowercase `failed`. Failures expose safe `failed_stage`, structured `error`, and backward-compatible `error_message` fields. New errors store public messages; legacy raw errors are sanitized on read without rewriting saved rows. See the [error contract](ARCHITECTURE.md#public-errors-and-internal-diagnostics) for an example and diagnostic policy.
 
 The frontend loads project/transcript/moments/clips on open or explicit reload, polls only status every four seconds while processing, and stops at READY/FAILED. Clip-only refreshes reuse loaded transcript/moments; ingestion transitions/resubmission invalidate that cache. Requests time out after 30 seconds with a locally owned network message rather than arbitrary server/proxy text.
 

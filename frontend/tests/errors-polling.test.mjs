@@ -144,3 +144,25 @@ test('switching projects ignores a late response and cancels future polling', as
   finish(new Response(JSON.stringify({ project_id: 'old', status: 'READY' })))
   await setImmediate()
 })
+
+test('stale processing guidance fires after ten minutes and stops after a terminal status', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let status = 'ANALYZING'
+  let stale = 0
+  t.mock.method(globalThis, 'fetch', async (url) => new Response(JSON.stringify(projectResponse(url, status))))
+  const stop = api.watchProject('p', {
+    onStatus: () => {},
+    onError: assert.fail,
+    onRefresh: async () => {},
+    onStale: () => { stale += 1 },
+  })
+  t.after(stop)
+  await setImmediate()
+  t.mock.timers.tick(10 * 60 * 1000)
+  assert.equal(stale, 1)
+  status = 'READY'
+  t.mock.timers.tick(4000)
+  await setImmediate()
+  t.mock.timers.tick(10 * 60 * 1000)
+  assert.equal(stale, 1)
+})

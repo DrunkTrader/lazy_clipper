@@ -19,7 +19,7 @@ The original video plays through YouTube. Generated clips can be previewed and d
 - Jump to a moment in the original video before creating a clip.
 - Render selected moments as center-cropped 1080×1920 MP4s with burned-in word captions.
 - Preview and download completed clips.
-- Retry failed processing or individual clips while retaining completed work.
+- Retry failed processing or individual clips, adjust clip ranges, and delete terminal projects while retaining other completed work.
 
 ## Requirements
 
@@ -75,6 +75,7 @@ Use [`.env.example`](.env.example) for the complete configuration reference.
 | `LLM_MODEL` | Model identifier offered by the provider |
 | `VITE_API_BASE_URL` | Empty for Compose; set only for a separate API origin |
 | `WHISPER_MODEL` / `WHISPER_DEVICE` | Transcription model/device; defaults are `small` / `cpu` |
+| `MEDIA_TIMEOUT_MARGIN_SECONDS` | FFmpeg safety margin inside the configured ingestion/clip budgets |
 
 The LLM URL, key, and model must be valid, non-placeholder settings. Startup checks configuration without contacting the provider. For a gateway such as FreeLLMAPI running on the Docker host, use `http://host.docker.internal:3001/v1`; for local development, use its locally reachable address.
 

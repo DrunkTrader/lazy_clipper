@@ -11,10 +11,19 @@ class FFmpegError(RuntimeError):
 
 
 class MediaService:
-    _FFMPEG_TIMEOUT_SECONDS = 300
-
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    def _subprocess_timeout(self, budget: float) -> float:
+        """Leave a configurable margin for the outer process supervisor.
+
+        The supervisor still owns the complete job deadline and the FFmpeg
+        process remains in its process group. This inner deadline only avoids
+        waiting right up to the supervisor boundary before surfacing a media
+        timeout to the pipeline.
+        """
+        margin = min(self.settings.media_timeout_margin_seconds, budget / 2)
+        return budget - margin
 
     def extract_audio(self, source_path: Path, audio_path: Path) -> Path:
         if not source_path.is_file():
@@ -47,7 +56,7 @@ class MediaService:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=self._FFMPEG_TIMEOUT_SECONDS,
+                timeout=self._subprocess_timeout(self.settings.ingestion_timeout_seconds),
             )
         except subprocess.TimeoutExpired as exc:
             if audio_path.exists():
@@ -97,7 +106,13 @@ class MediaService:
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(temporary),
         ]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=900)
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self._subprocess_timeout(self.settings.clip_timeout_seconds),
+            )
             if completed.returncode != 0:
                 detail = (completed.stderr or completed.stdout or "unknown FFmpeg error").strip()[-2000:]
                 raise FFmpegError(f"FFmpeg clip rendering failed: {detail}")

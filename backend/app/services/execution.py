@@ -21,6 +21,26 @@ class TerminationFailure(RuntimeError):
     """Fail closed: do not retry or persist completion while work may still run."""
 
 
+_CHILD_ENVIRONMENT_KEYS = {
+    "PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
+    "LD_LIBRARY_PATH", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "HTTP_PROXY", "HTTPS_PROXY",
+    "ALL_PROXY", "NO_PROXY", "XDG_CACHE_HOME", "TORCH_HOME", "HF_HOME",
+}
+
+
+def child_environment(temporary: str, parent_pid: int) -> dict[str, str]:
+    """Pass runtime plumbing to a job without inheriting application secrets."""
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key in _CHILD_ENVIRONMENT_KEYS
+    }
+    environment.update({
+        "TMPDIR": temporary,
+        "LAZYCLIPPER_PARENT_PID": str(parent_pid),
+    })
+    return environment
+
+
 def _signal_group(process: subprocess.Popen, sig: int) -> None:
     try:
         os.killpg(process.pid, sig)
@@ -123,7 +143,7 @@ class JobSupervisor:
                     timeout=self.settings.clip_timeout_seconds if clip_id else self.settings.ingestion_timeout_seconds,
                     stop=self.stop,
                     input_data=self.settings.model_dump_json().encode(),
-                    env={**os.environ, "TMPDIR": temporary, "LAZYCLIPPER_PARENT_PID": str(os.getpid())},
+                    env=child_environment(temporary, os.getpid()),
                 )
         except TerminationFailure as exc:
             # Do not publish retryability if termination could not be confirmed.

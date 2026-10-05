@@ -39,6 +39,22 @@ def test_deadline_kills_stubborn_process_and_its_descendant(tmp_path):
     assert not late.exists()
 
 
+def test_job_child_environment_excludes_application_credentials(monkeypatch, tmp_path):
+    from backend.app.services.execution import child_environment
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://private")
+    monkeypatch.setenv("DATABASE_PASSWORD_FILE", "/run/secrets/database")
+    monkeypatch.setenv("LLM_API_KEY", "private-key")
+    monkeypatch.setenv("YTDLP_COOKIE_FILE", "/app/cookies.txt")
+    environment = child_environment(str(tmp_path), 1234)
+    assert environment["TMPDIR"] == str(tmp_path)
+    assert environment["LAZYCLIPPER_PARENT_PID"] == "1234"
+    assert "DATABASE_URL" not in environment
+    assert "DATABASE_PASSWORD_FILE" not in environment
+    assert "LLM_API_KEY" not in environment
+    assert "YTDLP_COOKIE_FILE" not in environment
+
+
 def test_shutdown_stops_active_process_before_returning(tmp_path):
     from backend.app.services.execution import JobInterrupted, run_process
 

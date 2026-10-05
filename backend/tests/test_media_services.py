@@ -177,12 +177,14 @@ def test_whisper_timestamped_rejects_empty_transcript(monkeypatch, tmp_path):
         WhisperTimestampedTranscriber(Settings()).transcribe(audio_path)
 
 
-def test_ffmpeg_is_noninteractive_bounded_and_removes_stale_output(monkeypatch, tmp_path):
+def test_ffmpeg_timeouts_follow_job_budgets_and_remove_stale_output(monkeypatch, tmp_path):
     source = tmp_path / "video.mp4"
     output = tmp_path / "audio.wav"
     source.write_bytes(b"video")
     output.write_bytes(b"stale")
     calls = {}
+    settings = Settings(_env_file=None, ingestion_timeout_seconds=600, clip_timeout_seconds=720,
+                        media_timeout_margin_seconds=30)
 
     def fake_run(command, **kwargs):
         calls["command"] = command
@@ -191,14 +193,25 @@ def test_ffmpeg_is_noninteractive_bounded_and_removes_stale_output(monkeypatch, 
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert MediaService(Settings()).extract_audio(source, output) == output
+    assert MediaService(settings).extract_audio(source, output) == output
     assert "-nostdin" in calls["command"]
-    assert calls["kwargs"]["timeout"] == 300
+    assert calls["kwargs"]["timeout"] == 570
+
+    render_output = tmp_path / "rendered.mp4"
+
+    def fake_render(command, **kwargs):
+        calls["render_kwargs"] = kwargs
+        Path(command[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_render)
+    assert MediaService(settings).render_clip(source, render_output, 0, 1) == render_output
+    assert calls["render_kwargs"]["timeout"] == 690
 
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
     monkeypatch.setattr(subprocess, "run", timeout)
     with pytest.raises(FFmpegError, match="timed out"):
-        MediaService(Settings()).extract_audio(source, output)
+        MediaService(settings).extract_audio(source, output)
     assert not output.exists()

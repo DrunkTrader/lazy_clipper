@@ -10,6 +10,7 @@ import {
   asRecord,
   createClip,
   createProject,
+  deleteProject,
   extractItems,
   extractProjectId,
   formatTime,
@@ -93,9 +94,12 @@ function App() {
   const [projectError, setProjectError] = useState<string | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
   const [contentError, setContentError] = useState<string | null>(null)
+  const [statusStale, setStatusStale] = useState(false)
   const [projectLoading, setProjectLoading] = useState(false)
   const [contentLoading, setContentLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [deletingProject, setDeletingProject] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Selection>(null)
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null)
   const activeProjectId = useRef(projectId)
@@ -153,6 +157,7 @@ function App() {
     let cancelled = false
     setProjectLoading(true)
     setClipsLoading(true)
+    setStatusStale(false)
     setContentLoading(contentLoadedFor.current !== projectId)
     const stop = watchProject(projectId, {
       onStatus: (nextStatus) => {
@@ -163,6 +168,7 @@ function App() {
         setStatusError(null)
         setSavedProjects((current) => current.map((item) => item.id === projectId ? { ...item, status: nextStatus.status } : item))
       },
+      onStale: () => setStatusStale(true),
       onError: (error) => setStatusError(errorMessage(error)),
       onRefresh: async (nextStatus) => {
         const reuseContent = contentLoadedFor.current === projectId
@@ -273,17 +279,19 @@ function App() {
     }
   }
 
-  async function handleCreateClip(moment: Moment) {
+  async function handleCreateClip(moment: Moment, requestedStart = moment.start, requestedEnd = moment.end) {
     const momentId = getString(moment.id)
-    const start = moment.start
-    const end = moment.end
-    if (!momentId || start === undefined || end === undefined || creatingClipId) return
+    if (!momentId || requestedStart === undefined || requestedEnd === undefined || creatingClipId) return
+    if (!Number.isFinite(requestedStart) || !Number.isFinite(requestedEnd) || requestedEnd <= requestedStart) {
+      setClipCreationError('Clip end must be greater than clip start.')
+      return
+    }
     const requestedProjectId = projectId
-    setSelected({ id: momentId, start, end, label: moment.title ?? 'Moment' })
+    setSelected({ id: momentId, start: requestedStart, end: requestedEnd, label: moment.title ?? 'Moment' })
     setCreatingClipId(momentId)
     setClipCreationError(null)
     try {
-      const clip = await createClip(requestedProjectId, { moment_id: momentId, start, end })
+      const clip = await createClip(requestedProjectId, { moment_id: momentId, start: requestedStart, end: requestedEnd })
       if (activeProjectId.current !== requestedProjectId) return
       setClips((current) => [...current.filter((item) => item.id !== clip.id && item.moment_id !== clip.moment_id), clip])
       setStatus({ status: 'RENDERING', message: 'Rendering the selected clip.' })
@@ -295,6 +303,30 @@ function App() {
         // Read the persisted state after success or a conflict; never retry a POST automatically.
         setRefreshVersion((version) => version + 1)
       }
+    }
+  }
+
+  async function handleDeleteProject() {
+    if (!projectId || deletingProject) return
+    if (!window.confirm('Delete this project and all generated media? This cannot be undone.')) return
+    const requestedProjectId = projectId
+    setDeletingProject(true)
+    setDeleteError(null)
+    try {
+      await deleteProject(requestedProjectId)
+      setSavedProjects((current) => current.filter((item) => extractProjectId(item) !== requestedProjectId))
+      setProject(null)
+      setStatus(null)
+      setTranscript([])
+      setMoments([])
+      setClips([])
+      setSelected(null)
+      setProjectId('')
+      window.history?.replaceState({}, '', window.location.pathname)
+    } catch (error) {
+      if (activeProjectId.current === requestedProjectId) setDeleteError(errorMessage(error))
+    } finally {
+      if (activeProjectId.current === requestedProjectId) setDeletingProject(false)
     }
   }
 
@@ -367,10 +399,23 @@ function App() {
                   <h2>{title}</h2>
                   <p className="project-id">ID: {getString(project.project_id) ?? getString(project.id) ?? projectId}</p>
                 </div>
-                <div className={`status-pill ${failed ? 'failed' : isReady(currentStatus) ? 'ready' : ''}`}>
-                  <span className="status-dot" /> {currentStatus}
+                <div className="project-heading-actions">
+                  <div className={`status-pill ${failed ? 'failed' : isReady(currentStatus) ? 'ready' : ''}`}>
+                    <span className="status-dot" /> {currentStatus}
+                  </div>
+                  <button
+                    type="button"
+                    className="danger-button"
+                    onClick={() => void handleDeleteProject()}
+                    disabled={deletingProject}
+                    aria-label="Delete project"
+                  >
+                    {deletingProject ? 'Deleting…' : 'Delete project'}
+                  </button>
                 </div>
               </section>
+
+              {deleteError && <p className="error-text" role="alert">Could not delete project: {deleteError}</p>}
 
               {failed && (
                 <div className="alert failed-box" role="alert">
@@ -382,6 +427,13 @@ function App() {
                 <div className="alert progress-box">
                   <strong>{currentStatus === 'RENDERING' ? 'Generating clips' : `Processing: ${currentStatus}`}</strong>
                   <span>{statusMessage ?? 'The project is still being processed. This page checks for updates automatically.'}</span>
+                  {statusStale && <>
+                    <span>This job may be stuck. Reload to refresh status.</span>
+                    <button type="button" className="text-button" onClick={() => {
+                      setStatusStale(false)
+                      setRefreshVersion((version) => version + 1)
+                    }}>Reload status</button>
+                  </>}
                 </div>
               )}
 
@@ -443,7 +495,9 @@ function App() {
                            title={moment.title ?? 'Moment'}
                            canCreate={canCreateClip}
                            creating={creatingClipId === moment.id}
-                           onCreate={() => void handleCreateClip(moment)}
+                           start={start}
+                           end={end}
+                           onCreate={(requestedStart, requestedEnd) => void handleCreateClip(moment, requestedStart, requestedEnd)}
                          />
                       </article>
                     })}
@@ -477,29 +531,82 @@ function App() {
   )
 }
 
-function MomentClip({ clip, loading, unavailable, title, canCreate, creating, onCreate }: {
+function MomentClip({ clip, loading, unavailable, title, start, end, canCreate, creating, onCreate }: {
   clip?: GeneratedClip
   loading: boolean
   unavailable: boolean
   title: string
+  start?: number
+  end?: number
   canCreate: boolean
   creating: boolean
-  onCreate: () => void
+  onCreate: (start: number, end: number) => void
 }) {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewError, setPreviewError] = useState(false)
+  const [startValue, setStartValue] = useState('')
+  const [endValue, setEndValue] = useState('')
+  const [rangeError, setRangeError] = useState<string | null>(null)
 
   useEffect(() => {
     setPreviewOpen(false)
     setPreviewError(false)
   }, [clip?.id, clip?.media_url])
 
+  useEffect(() => {
+    setStartValue(String(clip?.start ?? start ?? ''))
+    setEndValue(String(clip?.end ?? end ?? ''))
+    setRangeError(null)
+  }, [clip?.id, clip?.start, clip?.end, start, end])
+
+  const parsedStart = startValue.trim() === '' ? undefined : Number(startValue)
+  const parsedEnd = endValue.trim() === '' ? undefined : Number(endValue)
+  const validRange = parsedStart !== undefined && parsedEnd !== undefined
+    && Number.isFinite(parsedStart) && Number.isFinite(parsedEnd) && parsedEnd > parsedStart
+  const rangeChanged = !!clip && validRange && (clip.start !== parsedStart || clip.end !== parsedEnd)
+  const actionLabel = !clip ? 'Create Clip' : clip.status === 'FAILED' ? 'Retry Clip' : rangeChanged ? 'Update Clip' : null
+
+  function submitRange() {
+    if (parsedStart === undefined || parsedEnd === undefined || !Number.isFinite(parsedStart)
+      || !Number.isFinite(parsedEnd) || parsedEnd <= parsedStart) {
+      setRangeError('Clip end must be greater than clip start.')
+      return
+    }
+    setRangeError(null)
+    onCreate(parsedStart, parsedEnd)
+  }
+
+  const rangeControls = <div className="clip-range-controls">
+    <label>Start
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        value={startValue}
+        aria-label={`Clip start for ${title}`}
+        onChange={(event) => { setStartValue(event.target.value); setRangeError(null) }}
+      />
+    </label>
+    <label>End
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        value={endValue}
+        aria-label={`Clip end for ${title}`}
+        onChange={(event) => { setEndValue(event.target.value); setRangeError(null) }}
+      />
+    </label>
+  </div>
+
   if (!clip) {
     return <div className="moment-clip">
+      {rangeControls}
+      {rangeError && <p className="error-text" role="alert">{rangeError}</p>}
       <div className="clip-heading">
         <p className="muted">{loading ? 'Loading clip status…' : unavailable ? 'Clip status unavailable.' : 'No clip created yet.'}</p>
-        <button type="button" className="clip-button" onClick={onCreate} disabled={!canCreate || creating}>
-          {creating ? 'Requesting…' : 'Create Clip'}
+        <button type="button" className="clip-button" onClick={submitRange} disabled={!canCreate || creating}>
+          {creating ? 'Requesting…' : actionLabel}
         </button>
       </div>
     </div>
@@ -509,10 +616,14 @@ function MomentClip({ clip, loading, unavailable, title, canCreate, creating, on
   const canRetry = clip.status === 'FAILED' && canCreate
   const previewId = `clip-preview-${clip.id}`
   return <div className="moment-clip">
+    {rangeControls}
+    {rangeError && <p className="error-text" role="alert">{rangeError}</p>}
     <div className="clip-heading">
       <span className={`clip-status ${ready ? 'ready' : clip.status === 'FAILED' ? 'failed' : ''}`} role="status">Clip: {clip.status}</span>
       <div className="clip-actions">
-        {canRetry && <button type="button" className="clip-button" onClick={onCreate} disabled={creating}>{creating ? 'Requesting…' : 'Retry Clip'}</button>}
+        {(canRetry || (ready && rangeChanged)) && <button type="button" className="clip-button" onClick={submitRange} disabled={creating}>
+          {creating ? 'Requesting…' : actionLabel}
+        </button>}
         {ready && <>
         {clip.media_url && <button
           type="button"
