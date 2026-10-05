@@ -12,12 +12,39 @@ export const stageMessages = {
 } as const
 
 export type FailureStage = keyof typeof stageMessages
+const interruptedMessages: Partial<Record<FailureStage, string>> = {
+  ingestion: 'Video ingestion was interrupted. Submit the video again to retry.',
+  transcription: 'Transcription was interrupted. Submit the video again to retry.',
+  analysis: 'AI analysis was interrupted. Submit the video again to retry.',
+  rendering: 'Clip rendering was interrupted. Retry the affected clip.',
+}
+
+const captionMessages: Record<string, string> = {
+  CAPTION_ALIGNMENT_MISSING: 'Stored word timing is unavailable for this range. The transcript needs repair before this clip can be created.',
+  CAPTION_NO_SPEECH: 'This range has no captionable speech. Choose a range containing speech.',
+}
+
+const timeoutMessages: Partial<Record<FailureStage, string>> = {
+  ingestion: 'Video ingestion exceeded its time limit. Submit the video again to retry.',
+  transcription: 'Transcription exceeded its time limit. Submit the video again to retry.',
+  analysis: 'AI analysis exceeded its time limit. Submit the video again to retry.',
+  rendering: 'Clip rendering exceeded its time limit. Retry the affected clip.',
+}
+
+const limitMessages: Record<string, string> = {
+  SOURCE_DURATION_LIMIT: 'The source duration is unavailable or exceeds the configured processing limit. Choose a shorter video with a known duration.',
+  CLIP_TOO_LONG: 'The clip exceeds the configured duration limit. Choose a shorter range.',
+}
+
 export type FailureFields = {
   failed_stage?: FailureStage | null
   error?: { code: string; message?: string } | null
 }
 
 const clientMessages: Record<string, string> = {
+  ...limitMessages,
+  PROCESSING_BUSY: 'Processing capacity is full. Please try again shortly.',
+  STORAGE_BUDGET: 'Storage capacity is full or reserved for existing work. Remove an old project or try again later.',
   INVALID_REQUEST: 'Invalid request. Please check your input.',
   INVALID_URL: 'Enter a valid YouTube video URL.',
   INVALID_RANGE: 'Clip end must be greater than clip start.',
@@ -41,6 +68,10 @@ export function publicError(value: unknown, fallback: FailureStage = 'unknown', 
   }
   const stage = typeof record.failed_stage === 'string' && Object.prototype.hasOwnProperty.call(stageMessages, record.failed_stage)
     ? record.failed_stage as FailureStage : fallback
+  if (error.code === 'PROCESSING_INTERRUPTED' && interruptedMessages[stage]) return interruptedMessages[stage]
+  if (error.code === 'PROCESSING_TIMEOUT' && timeoutMessages[stage]) return timeoutMessages[stage]
+  if (typeof error.code === 'string' && Object.prototype.hasOwnProperty.call(limitMessages, error.code)) return limitMessages[error.code]
+  if (typeof error.code === 'string' && Object.prototype.hasOwnProperty.call(captionMessages, error.code)) return captionMessages[error.code]
   return stageMessages[stage]
 }
 
@@ -48,7 +79,7 @@ export class ApiError extends Error {
   readonly status: number
 
   constructor(status: number, body: unknown, fallback: FailureStage) {
-    super(status === 0 ? 'Unable to reach the server. Please try again.' : publicError(body, fallback, status >= 400 && status < 500))
+    super(status === 0 ? 'Unable to reach the server. Please try again.' : publicError(body, fallback, (status >= 400 && status < 500) || status === 507))
     this.name = 'ApiError'
     this.status = status
   }

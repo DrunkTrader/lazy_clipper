@@ -8,7 +8,7 @@ import pytest
 
 from backend.app.config import Settings
 from backend.app.db import init_db, session_factory
-from backend.app.models import Clip, Moment, Project, Video
+from backend.app.models import Clip, Moment, Project, TranscriptSegment, Video
 from backend.app.services.captions import write_ass
 from backend.app.services.media import FFmpegError, MediaService
 from backend.app.services.pipeline import Pipeline
@@ -58,6 +58,10 @@ def test_clip_failure_is_isolated_and_retry_keeps_successes(tmp_path):
         source = root / "source" / "video.mp4"
         source.write_bytes(b"source")
         project.video = Video(source_path=str(source), duration=30)
+        project.transcript_segments.append(TranscriptSegment(
+            segment_index=0, start=0, end=15, text="First second",
+            words=[{"word": "First", "start": 0, "end": 5}, {"word": "second", "start": 10, "end": 15}],
+        ))
         for rank in range(2):
             project.moments.append(Moment(title=f"Moment {rank}", description="Description", reason="Reason",
                                           start=rank * 10, end=rank * 10 + 5, score=8, rank=rank))

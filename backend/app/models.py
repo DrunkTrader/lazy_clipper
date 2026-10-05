@@ -2,8 +2,8 @@
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, false
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from .db import Base
 
@@ -18,9 +18,11 @@ def utcnow() -> datetime:
 
 class Project(Base):
     __tablename__ = "projects"
+    __table_args__ = (Index("uq_projects_source_url", "source_url", unique=True),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    analysis_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED", index=True)
     status_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -39,6 +41,12 @@ class Project(Base):
     )
     clips: Mapped[list["Clip"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
+    @validates("source_url")
+    def canonical_source_url(self, key: str, value: str) -> str:
+        from .services.youtube import canonical_youtube_url
+
+        return canonical_youtube_url(value)
+
 
 class Video(Base):
     __tablename__ = "videos"
@@ -46,7 +54,7 @@ class Video(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    youtube_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    youtube_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)

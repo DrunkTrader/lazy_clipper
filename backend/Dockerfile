@@ -13,7 +13,7 @@ RUN apt-get update \
     && python -m venv "$VIRTUAL_ENV"
 
 WORKDIR /build
-COPY pyproject.toml ./
+COPY pyproject.toml constraints.txt ./
 # Read dependency declarations from their existing source of truth. Source-code
 # edits must not invalidate the expensive transcription/PyTorch installation layer.
 RUN --mount=type=cache,target=/root/.cache/pip python - <<'PY'
@@ -26,14 +26,12 @@ with open("pyproject.toml", "rb") as manifest:
     project = tomllib.load(manifest)["project"]
 requirements = project["dependencies"] + project["optional-dependencies"]["transcription"]
 install = [sys.executable, "-m", "pip", "install"]
-if platform.machine().lower() not in {"x86_64", "amd64"}:
-    # Match WhisperX's non-x86 Linux CPU index and compatible Torch 2.8 pair.
-    # ARM64 Torchaudio 2.8's CPU wheel has no +cpu version suffix.
-    cpu_requirements = ["torch==2.8.0+cpu", "torchaudio==2.8.0"]
-    subprocess.check_call(install + ["--index-url", "https://download.pytorch.org/whl/cpu"] + cpu_requirements)
-    # Keep the CPU build pinned when resolving the application's dependencies.
-    requirements += cpu_requirements
-subprocess.check_call(install + requirements)
+# CPU is the configured production device on both supported Linux architectures.
+# Install the tested CPU Torch pair from its dedicated index before resolving the
+# remaining packages against the checked-in transitive constraints.
+cpu_requirements = ["torch==2.8.0+cpu", "torchaudio==2.8.0"]
+subprocess.check_call(install + ["--index-url", "https://download.pytorch.org/whl/cpu"] + cpu_requirements)
+subprocess.check_call(install + ["--constraint", "constraints.txt"] + requirements)
 PY
 
 FROM python:3.12-slim-bookworm AS runtime

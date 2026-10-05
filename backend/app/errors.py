@@ -18,8 +18,44 @@ PUBLIC_MESSAGES: dict[Stage, str] = {
     "unknown": "Internal server error. Please try again later.",
 }
 
+# Persist application-owned messages in the existing columns. The structured
+# code distinguishes interruption from provider/internal failures without a
+# schema change; both remain explicit, user-requested retries.
+INTERRUPTED_MESSAGES: dict[Stage, str] = {
+    "ingestion": "Video ingestion was interrupted. Submit the video again to retry.",
+    "transcription": "Transcription was interrupted. Submit the video again to retry.",
+    "analysis": "AI analysis was interrupted. Submit the video again to retry.",
+    "rendering": "Clip rendering was interrupted. Retry the affected clip.",
+}
+
+CAPTION_MESSAGES = {
+    "CAPTION_ALIGNMENT_MISSING": "Stored word timing is unavailable for this range. The transcript needs repair before this clip can be created.",
+    "CAPTION_NO_SPEECH": "This range has no captionable speech. Choose a range containing speech.",
+}
+
+TIMEOUT_MESSAGES: dict[Stage, str] = {
+    "ingestion": "Video ingestion exceeded its time limit. Submit the video again to retry.",
+    "transcription": "Transcription exceeded its time limit. Submit the video again to retry.",
+    "analysis": "AI analysis exceeded its time limit. Submit the video again to retry.",
+    "rendering": "Clip rendering exceeded its time limit. Retry the affected clip.",
+}
+
+LIMIT_MESSAGES = {
+    "SOURCE_DURATION_LIMIT": "The source duration is unavailable or exceeds the configured processing limit. Choose a shorter video with a known duration.",
+    "CLIP_TOO_LONG": "The clip exceeds the configured duration limit. Choose a shorter range.",
+}
+
+
+class WorkloadLimitError(ValueError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(LIMIT_MESSAGES[code])
+
 # Only these application-authored validation/conflict messages may cross the API.
 CLIENT_MESSAGES = {
+    **LIMIT_MESSAGES,
+    "PROCESSING_BUSY": "Processing capacity is full. Please try again shortly.",
+    "STORAGE_BUDGET": "Storage capacity is full or reserved for existing work. Remove an old project or try again later.",
     "INVALID_REQUEST": "Invalid request. Please check your input.",
     "INVALID_URL": "Enter a valid YouTube video URL.",
     "INVALID_RANGE": "Clip end must be greater than clip start.",
@@ -45,6 +81,10 @@ def processing_error(stage: Stage) -> PublicError:
     return PublicError(code="PROCESSING_ERROR", message=PUBLIC_MESSAGES[stage])
 
 
+def interrupted_error(stage: Stage) -> PublicError:
+    return PublicError(code="PROCESSING_INTERRUPTED", message=INTERRUPTED_MESSAGES[stage])
+
+
 def failure_stage(exc: Exception, stage: Stage) -> Stage:
     return "database" if isinstance(exc, SQLAlchemyError) else stage
 
@@ -55,6 +95,18 @@ def stored_failure(message: str | None, fallback: Stage = "unknown") -> tuple[St
     Reusing error_message avoids a schema migration. No legacy text is returned;
     unrecognized historical failures receive the generic public message.
     """
+    for stage, public_message in INTERRUPTED_MESSAGES.items():
+        if message == public_message:
+            return stage, interrupted_error(stage)
+    for stage, public_message in TIMEOUT_MESSAGES.items():
+        if message == public_message:
+            return stage, PublicError(code="PROCESSING_TIMEOUT", message=public_message)
+    for code, public_message in LIMIT_MESSAGES.items():
+        if message == public_message:
+            return ("ingestion" if code == "SOURCE_DURATION_LIMIT" else "rendering"), PublicError(code=code, message=public_message)
+    for code, public_message in CAPTION_MESSAGES.items():
+        if message == public_message:
+            return "rendering", PublicError(code=code, message=public_message)
     for stage, public_message in PUBLIC_MESSAGES.items():
         if message == public_message:
             return stage, processing_error(stage)

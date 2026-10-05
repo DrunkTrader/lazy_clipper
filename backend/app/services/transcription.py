@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from ..analysis.transcript import require_word_alignment
 
 
 class TranscriptionError(RuntimeError):
@@ -47,6 +48,7 @@ class WhisperTimestampedTranscriber:
                 raise TranscriptionError("whisper-timestamped returned invalid segments")
             if not segments:
                 raise TranscriptionError("whisper-timestamped returned no transcript segments")
+            require_word_alignment(segments)
             # whisper-timestamped supplies per-word text/start/end values. Keep
             # the complete segment objects so normalization can persist them.
             return [dict(segment) for segment in segments]

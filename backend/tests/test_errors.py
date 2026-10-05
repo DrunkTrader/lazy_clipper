@@ -137,6 +137,37 @@ def test_database_and_unhandled_errors_are_sanitized(caplog):
     assert "database unavailable" in caplog.text
 
 
+def test_inline_database_driver_values_are_not_retained(caplog):
+    configure_logging()
+    app = FastAPI()
+    install_error_handlers(app)
+
+    @app.get("/database")
+    def fail_database():
+        raise OperationalError("SELECT inline-private-marker", {"value": "private-row"}, RuntimeError("inline-private-marker"))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.get("/database").status_code == 500
+    assert "inline-private-marker" not in caplog.text
+    assert "private-row" not in caplog.text
+    assert "database driver failure sqlstate=unknown" in caplog.text
+
+
+@pytest.mark.parametrize("method,path,payload", [
+    ("get", "/api/v1/projects/missing", None),
+    ("post", "/api/v1/projects/missing/clips", {"moment_id": "m", "start": 0, "end": 1}),
+    ("post", "/api/v1/ingest", {"url": "not-a-youtube-url"}),
+])
+def test_expected_client_errors_are_warning_without_traceback(api_client, caplog, method, path, payload):
+    caplog.set_level(logging.DEBUG, logger="lazyclipper")
+    caplog.clear()
+    response = getattr(api_client, method)(path, json=payload) if payload is not None else getattr(api_client, method)(path)
+    assert response.status_code in {404, 409, 422}
+    records = [record for record in caplog.records if record.name == "lazyclipper"]
+    assert records and records[-1].levelno == logging.WARNING
+    assert "Traceback" not in caplog.text
+
+
 def test_failed_database_commit_rolls_back_and_persists_safe_database_error(tmp_path, monkeypatch, caplog):
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'commit-error.db'}", storage_dir=tmp_path / "storage")
     init_db(settings.database_url)

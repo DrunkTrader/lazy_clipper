@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { setImmediate } from 'node:timers/promises'
 import { test } from 'node:test'
 import { build } from 'vite'
+import { projectResponse } from './fixtures.mjs'
 
 // Use the existing Vite/TypeScript toolchain and Node's test runner. No DOM or
 // additional test framework is needed for the request and polling boundaries.
@@ -23,6 +24,34 @@ test('display uses local stage messages and never trusts raw or legacy error tex
   assert.equal(api.publicError({ failed_stage: '__proto__' }), api.stageMessages.unknown)
   assert.equal(api.publicError({ error: { code: 'toString', message: raw } }, 'rendering', true), api.stageMessages.rendering)
   assert.equal(api.errorMessage(new Error(raw)), api.stageMessages.unknown)
+})
+
+test('interrupted processing displays local retry guidance without trusting server text', () => {
+  for (const stage of ['ingestion', 'transcription', 'analysis', 'rendering']) {
+    const message = api.publicError({ failed_stage: stage, error: { code: 'PROCESSING_INTERRUPTED', message: raw } })
+    assert.match(message, /interrupted/i)
+    assert.match(message, /retry/i)
+    assert.ok(!message.includes('private'))
+  }
+})
+
+test('caption silence and missing timing use different safe messages', () => {
+  const missing = api.publicError({ error: { code: 'CAPTION_ALIGNMENT_MISSING', message: raw } })
+  const silent = api.publicError({ error: { code: 'CAPTION_NO_SPEECH', message: raw } })
+  assert.match(missing, /transcript needs repair/)
+  assert.match(silent, /no captionable speech/)
+  assert.notEqual(missing, silent)
+  assert.equal(api.publicError({ error: { code: '__proto__', message: raw } }), api.stageMessages.unknown)
+})
+
+test('capacity, duration limits, and timeouts use safe local guidance', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ error: { code: 'PROCESSING_BUSY', message: raw } }), { status: 429 }))
+  await assert.rejects(api.createProject('https://youtu.be/dQw4w9WgXcQ'), { message: 'Processing capacity is full. Please try again shortly.', status: 429 })
+  for (const stage of ['ingestion', 'transcription', 'analysis', 'rendering']) {
+    assert.match(api.publicError({ failed_stage: stage, error: { code: 'PROCESSING_TIMEOUT', message: raw } }), /exceeded its time limit/)
+  }
+  assert.match(api.publicError({ error: { code: 'SOURCE_DURATION_LIMIT', message: raw } }), /shorter video/)
+  assert.match(api.publicError({ error: { code: 'CLIP_TOO_LONG', message: raw } }), /shorter range/)
 })
 
 test('all server errors and proxy HTML become safe endpoint-specific messages', async (t) => {
@@ -69,7 +98,7 @@ for (const [processing, terminal] of [['ANALYZING', 'READY'], ['ANALYZING', 'FAI
     let status = processing
     t.mock.method(globalThis, 'fetch', async (url) => {
       calls.push(url)
-      return new Response(JSON.stringify(url.endsWith('/status') ? { status } : {}))
+      return new Response(JSON.stringify(projectResponse(url, status)))
     })
     const stop = api.watchProject('p', {
       onStatus: (value) => statuses.push(value.status),
@@ -96,7 +125,7 @@ for (const [processing, terminal] of [['ANALYZING', 'READY'], ['ANALYZING', 'FAI
 
 test('opening a terminal project loads details only once', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ status: 'READY' })))
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ project_id: 'p', status: 'READY' })))
   let refreshes = 0
   const stop = api.watchProject('p', { onStatus: () => {}, onError: assert.fail, onRefresh: async () => { refreshes++ } })
   t.after(stop)
@@ -112,6 +141,6 @@ test('switching projects ignores a late response and cancels future polling', as
   t.mock.method(globalThis, 'fetch', () => new Promise((resolve) => { finish = resolve }))
   const stop = api.watchProject('old', { onStatus: assert.fail, onError: assert.fail, onRefresh: assert.fail })
   stop()
-  finish(new Response(JSON.stringify({ status: 'READY' })))
+  finish(new Response(JSON.stringify({ project_id: 'old', status: 'READY' })))
   await setImmediate()
 })

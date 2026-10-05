@@ -1,6 +1,27 @@
 """Stored word selection and simple ASS caption generation."""
 from pathlib import Path
+import math
 from typing import Any, Iterable
+
+from ..analysis.transcript import require_word_alignment
+
+
+class CaptionError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def require_clip_alignment(segments: list[Any], start: float, end: float) -> None:
+    """Check the requested speech range; absent speech is handled separately."""
+    if not segments:
+        raise CaptionError("CAPTION_ALIGNMENT_MISSING", "No saved transcript is available for caption selection")
+    overlapping = [segment for segment in segments
+                   if float(_value(segment, "start", 0)) < end and float(_value(segment, "end", 0)) > start]
+    try:
+        require_word_alignment(overlapping)
+    except ValueError as exc:
+        raise CaptionError("CAPTION_ALIGNMENT_MISSING", "Saved speech has no usable word alignment") from exc
 
 
 ASS_HEADER = """[Script Info]
@@ -29,11 +50,14 @@ def select_words(segments: Iterable[Any], start: float, end: float) -> list[dict
     selected: list[dict[str, Any]] = []
     for segment in segments:
         for word in _value(segment, "words", []) or []:
-            text = str(_value(word, "word", _value(word, "text", ""))).strip()
+            raw_text = _value(word, "word", _value(word, "text", ""))
+            text = raw_text.strip() if isinstance(raw_text, str) else ""
             try:
                 word_start = float(_value(word, "start"))
                 word_end = float(_value(word, "end"))
             except (TypeError, ValueError):
+                continue
+            if not math.isfinite(word_start) or not math.isfinite(word_end):
                 continue
             if not text or word_end <= start or word_start >= end or word_end <= word_start:
                 continue
@@ -63,7 +87,7 @@ def build_ass(words: list[dict[str, Any]], clip_start: float, clip_end: float, *
     for index, word in enumerate(words):
         relative_start = max(0.0, float(word["start"]) - clip_start)
         relative_end = min(clip_end - clip_start, float(word["end"]) - clip_start)
-        if relative_end <= relative_start:
+        if relative_end <= relative_start or round(relative_end * 100) <= round(relative_start * 100):
             continue
         window_start = max(0, min(index - 1, len(words) - window_size))
         window_end = min(len(words), window_start + window_size)
@@ -74,6 +98,8 @@ def build_ass(words: list[dict[str, Any]], clip_start: float, clip_end: float, *
         lines.append(
             f"Dialogue: 0,{_ass_time(relative_start)},{_ass_time(relative_end)},Caption,,0,0,0,,{' '.join(displayed)}"
         )
+    if len(lines) == 1:
+        raise CaptionError("CAPTION_NO_SPEECH", "No caption dialogue events exist for the requested range")
     return "\n".join(lines) + "\n"
 
 

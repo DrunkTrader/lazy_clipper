@@ -58,9 +58,9 @@ The stack in [docker-compose.yml](docker-compose.yml) contains three services:
 
 | Service | Runtime and role | Default host port | Persistent data |
 | --- | --- | --- | --- |
-| `frontend` | Nginx serving the compiled React/TypeScript/Vite app and proxying `/api/` to `api:8000` | `5173` | Assets built into the image |
-| `api` | Python 3.12, FastAPI/Uvicorn, synchronous SQLAlchemy, and the processing thread pool | `8000` | `./storage:/app/storage` and `whisper_cache:/root/.cache` |
-| `postgres` | PostgreSQL 16 | `5432` | `postgres_data` volume |
+| `frontend` | Nginx serving the compiled app and proxying API/docs/health to `api:8000` | `5173` on the configured Tailscale address only | Assets built into the image |
+| `api` | Python 3.12, FastAPI/Uvicorn, synchronous SQLAlchemy, and the processing thread pool | None; internal `8000` | `./storage:/app/storage` and `whisper_cache:/root/.cache` |
+| `postgres` | PostgreSQL 16 | None; internal `5432` | `postgres_data` volume |
 
 The backend image provides the processing dependencies:
 
@@ -75,18 +75,22 @@ The [backend Dockerfile](backend/Dockerfile) caches dependency installation sepa
 
 Optional YouTube cookies are mounted read-only into the API container. The ingestion service uses a temporary writable copy for yt-dlp and ignores an absent/non-file cookie path. Cookies remain runtime authentication material, outside images, environment-file contents, and logs.
 
+The private frontend binding and tailnet policy define the trusted single-user access boundary. The API/database cannot bypass it through published ports. Compose disables CORS; local non-Compose Vite origins are explicitly configurable. Database passwords are installation-specific file secrets under ignored `.secrets/`; the API receives only the non-superuser application credential. `scripts/setup-database-role.sh` handles fresh initialization and an explicit, backed-up upgrade for existing volumes, preserving table ownership/data. The application retains schema-local CREATE permission for current table initialization; schema migration administration is separate from its runtime DML permissions. See README for the existing-volume procedure.
+
 ### Execution and startup
 
 - [main.py](backend/app/main.py) initializes database tables, creates `ThreadPoolExecutor(max_workers=2)`, and registers separate ingestion and single-clip runners.
-- POST routes persist a queued request before submitting its IDs to the executor and returning HTTP `202`. Processing runs outside the request lifecycle, using a worker-owned database session.
-- A process-local submission lock serializes duplicate checks and submissions. It coordinates the current single API process; it is not a distributed lock.
-- Database stages are persisted, but executor tasks are in memory. There is no durable job queue or startup recovery scan. A process interruption can leave a project or clip in an in-progress state; persisted stages support explicit retries once the record is eligible for retry.
-- PostgreSQL must become healthy before the API starts; the frontend waits for API health. API/PostgreSQL healthchecks use three-minute intervals after fast startup checks. `/health` returns a constant liveness response, not a live check of every dependency.
+- Startup validates transcript-window relationships and required non-placeholder LLM configuration before database initialization, executor/admission creation, or expensive work. It validates syntax/presence only and makes no provider request.
+- POST routes reserve bounded capacity before persisting a queued request and submitting its IDs to the executor. Two active jobs plus four waiting is the default; excess requests return retryable HTTP `429` without changing job records. `GET /api/v1/processing` exposes active/queued/reserved counts, available capacity, and oldest queued age.
+- Each executor thread supervises a Linux process group with a tiny parent-death guard and a pipeline child using new database sessions. Whole-job deadlines include download/model initialization/transcription/analysis. Timeout/shutdown kills descendants, reaps the direct child and confirms the group stopped before scoped failure persistence. An unconfirmed kill or failed failure-persistence disables admission. The guard kills its group on abrupt API-parent death without depending on model code releasing Python's GIL. This is local execution isolation, not a separate worker service or queue.
+- A process-local submission lock with a bounded acquisition wait serializes duplicate checks and submissions. It coordinates the current single API process; it is not a distributed lock. PostgreSQL connect/pool, statement and lock deadlines are explicit, with TCP dead-peer detection. Settings/source/clip policies are documented in README.
+- Database stages are persisted, but executor tasks are in memory. Before creating the executor, [services/recovery.py](backend/app/services/recovery.py) atomically changes orphan ingestion jobs and active clips to retryable `FAILED` states with `PROCESSING_INTERRUPTED`. Rendering projects return to `READY`, while successful clips and saved artifacts are preserved. Recovery does not enqueue jobs or change GET semantics. A recovery transaction failure aborts startup. This policy requires one API process and the old process fully stopped before replacement; it is not a distributed lease or live-job timeout.
+- PostgreSQL must become healthy before the API starts; the frontend waits for API readiness. `/health` remains a constant liveness response. `/ready` checks a local database `SELECT 1` and accepting admission state, without paid/provider calls. Compose's `unless-stopped` policy restarts services after process/host failures; startup recovery then reconciles abandoned jobs before accepting work.
 - Uvicorn and Nginx routine access logs are disabled. Application stage events and redacted failure diagnostics remain in backend/container logs.
 
 ## Workflow 1: ingest and analyze
 
-Entry point: `POST /api/v1/ingest` → `run_pipeline(project_id)` → `Pipeline.run()`.
+Entry point: `POST /api/v1/ingest` → admission reservation → `JobSupervisor.ingest(project_id)` → guarded child → `Pipeline.run()`.
 
 ```mermaid
 flowchart TD
@@ -115,17 +119,17 @@ Completed stages are reused; the diagram shows the dependency order when those s
 
 ### Submission and stage reuse
 
-The ingest route validates the YouTube host and video ID, canonicalizes the URL, and looks for an existing project by video ID or source URL. A repeated submission returns an already queued, processing, or usable completed project instead of enqueueing it again. An explicitly submitted `FAILED` project, or a `READY` project whose source is missing, is reset to `QUEUED` and processed using saved stages.
+The ingest route validates the YouTube host and video ID, canonicalizes the URL, and looks up the uniquely indexed canonical source URL. Existing project claims are row-locked; a concurrent insert conflict returns the winning project. A repeated submission returns an already queued, processing, or usable completed project instead of enqueueing it again. An explicitly submitted `FAILED` project, or a `READY` project whose source is missing, is reset to `QUEUED` and processed using saved stages once previous supervisor ownership has ended.
 
 The pipeline checks persisted rows and non-empty files:
 
 1. Fetch metadata and download the source only if the source file is absent.
 2. If transcript rows already exist, reuse them. Otherwise, reuse valid audio or extract mono 16 kHz WAV audio, then transcribe and normalize it.
 3. Save normalized `TranscriptSegment` rows, including available word timing data, and a `transcript.json` artifact. No valid normalized segments is a transcription failure.
-4. Analyze only if saved moments are absent. Persist selected moments with rank, composite score, dimension scores, and source segment references.
+4. Analyze only if `analysis_completed` is false. Persist selected moments with rank, composite score, dimension scores, source segment references, and the completion marker in one transaction, including zero-result analysis.
 5. Mark the project `READY` for inspection and clip requests.
 
-Reuse is based on existing artifacts/rows rather than a separate stage-history table. A valid analysis can return zero moments; malformed provider responses and service failures are handled as failures rather than fabricated results.
+Reuse uses existing artifacts/rows plus the explicit analysis-completed marker, without a separate stage-history table. A valid analysis can return zero moments and remains reusable; malformed provider responses and service failures are handled as failures rather than fabricated results.
 
 ### Timestamp-grounded LLM analysis
 
@@ -143,7 +147,7 @@ Detection/review schemas allow up to five candidates per chunk. Prompt templates
 
 ## Workflow 2: render one selected clip
 
-Entry point: `POST /api/v1/projects/{project_id}/clips` → `render_project_clip(project_id, clip_id)` → `Pipeline.render_clip()`.
+Entry point: `POST /api/v1/projects/{project_id}/clips` → admission reservation → `JobSupervisor.render(project_id, clip_id)` → guarded child → `Pipeline.render_clip()`.
 
 The request contains `moment_id`, `start`, and `end`. The route checks project/moment ownership, finite ordered timestamps, the source file, source duration when known, and processing conflicts. A saved moment and valid source can also be used from a `FAILED` project. The API permits one active clip render per project.
 
@@ -197,7 +201,7 @@ The pipeline retains an explicit legacy/backfill `render_clips()` helper. Normal
 
 | Entity | Relationship | Persisted data |
 | --- | --- | --- |
-| `Project` | Root entity | Canonical source URL, title, project status, safe status/error messages, created/updated timestamps |
+| `Project` | Root entity; unique canonical source URL | Title, project status, completed-analysis marker (including zero moments), safe status/error messages, created/updated timestamps |
 | `Video` | At most one per project | YouTube ID, title, duration, thumbnail URL, backend-only source/audio paths |
 | `TranscriptSegment` | Many per project; unique `(project_id, segment_index)` | Segment start/end, text, optional speaker, ordering index, JSON `words` data |
 | `Moment` | Many per project | Title, description, reason, source timestamps, rank, composite score, dimension scores, source segment indexes |
@@ -205,7 +209,7 @@ The pipeline retains an explicit legacy/backfill `render_clips()` helper. Normal
 
 PostgreSQL is the source of truth for project state and structured results. API requests and pipeline tasks use separate synchronous SQLAlchemy sessions. [db.py](backend/app/db.py) caches engines, enables connection pre-ping, and hides SQL parameters in exception formatting.
 
-Startup calls `Base.metadata.create_all()`. It can create missing tables but does not migrate existing table definitions. There is no migration framework or automatic schema-alteration step.
+Startup calls `migrations.ensure_schema()`: fresh databases get the current schema and revision, while existing databases must already have the expected revision/critical definitions. Explicit `python -m backend.app.migrations upgrade` performs transactional, versioned upgrades with the API stopped and a verified coordinated backup. Revision 1 canonicalizes legacy source identity, refuses ambiguous/invalid data, adds uniqueness/lookup indexes and backfills `analysis_completed` while retaining child rows/files. Normal runtime never silently alters an existing schema; see README for the table-owner maintenance connection.
 
 ### Filesystem artifacts
 
@@ -221,9 +225,11 @@ storage/projects/<project_id>/
     ├── <clip_id>.mp4
     ├── <clip_id>.ass          # temporary caption input during rendering
     └── <clip_id>.partial.mp4  # temporary encoding output
+
+storage/projects/.trash/<project_id>-<token>/  # short-lived explicit-delete quarantine
 ```
 
-The database stores media references, not media bytes. The API checks clip ownership and resolves served files within the requested project's `clips` directory. JSON exposes media/download URLs rather than filesystem paths. The downloaded source remains backend-only; there is no source-video media endpoint.
+The database stores media references, not media bytes. The API checks clip ownership and resolves served files within the requested project's `clips` directory. JSON exposes origin-relative media/download paths rather than filesystem paths; `api.ts` prepends the explicitly configured API origin only when one is configured. The downloaded source remains backend-only; there is no source-video media endpoint. `storage.py` scopes project paths, checks a 50 GiB default tree budget plus per-admission/low-free-space reserve, atomically writes reusable text artifacts, and removes only known temporary/quarantine paths at startup after old work has been reconciled. Explicit DELETE quarantines one project before its database cascade and retries/restores known quarantine paths after a hard kill according to whether the database row remains.
 
 GET requests remain read-only. If a `READY` clip's file is missing or outside its allowed directory, the clip-list response presents a safe `FAILED` media state and omits URLs without mutating the saved row. An explicit clip POST can retry the missing output.
 
@@ -246,15 +252,18 @@ All project routes are registered under `/api/v1` in [api/routes.py](backend/app
 | Method and path | Responsibility |
 | --- | --- |
 | `POST /api/v1/ingest` | Validate/reuse a project, or persist and submit explicit ingestion/retry/source repair |
-| `GET /api/v1/projects` | List saved projects |
+| `GET /api/v1/projects` | List saved projects with bounded `limit`/`offset` pagination |
 | `GET /api/v1/projects/{project_id}` | Read project and source metadata, including the YouTube video ID |
+| `DELETE /api/v1/projects/{project_id}` | Explicitly delete one terminal project and its scoped media |
 | `GET /api/v1/projects/{project_id}/status` | Read persisted project progress or public failure |
-| `GET /api/v1/projects/{project_id}/transcript` | Read persisted transcript segments and available word data |
+| `GET /api/v1/projects/{project_id}/transcript` | Read persisted segments; `include_words=false` omits word JSON from both query and response |
 | `GET /api/v1/projects/{project_id}/moments` | Read ranked saved moments |
 | `POST /api/v1/projects/{project_id}/clips` | Reuse or submit one requested clip; retry a failed/missing output |
 | `GET /api/v1/projects/{project_id}/clips` | Read clip statuses and available media/download URLs |
 | `GET /api/v1/projects/{project_id}/clips/{clip_id}/media` | Serve a scoped clip with byte-range support; `?download=true` uses attachment disposition |
-| `GET /health` | API liveness response |
+| `GET /health` | Cheap API process liveness response |
+| `GET /ready` | Database and local processing readiness, without provider calls |
+| `GET /api/v1/processing` | Read-only active/queued/reserved capacity snapshot |
 
 Opening a saved project through `?project_id=...`, refreshing, and previewing media issue read requests. Only explicit POST requests start work.
 
@@ -262,7 +271,8 @@ Opening a saved project through `?project_id=...`, refreshing, and previewing me
 
 - [App.tsx](frontend/src/App.tsx) owns form/selection state, saved project navigation, metadata, transcript, moments, clip actions, and playback.
 - [api.ts](frontend/src/api.ts) owns typed requests, URL construction, response parsing, and a 30-second request timeout.
-- [projectUpdates.ts](frontend/src/projectUpdates.ts) drives a single status poll loop. Project details, transcript, moments, and clips load initially or on an explicit refresh, then once on reaching a terminal state. During processing, only the project `/status` endpoint is polled, with a four-second delay between completed polling cycles.
+- [projectUpdates.ts](frontend/src/projectUpdates.ts) drives a single status poll loop and passes observed status into refresh boundaries. The workspace loads all details initially, reuses successfully loaded transcript/moments during clip-only refreshes, and invalidates that per-project cache on ingestion transitions/resubmission. During processing, only `/status` is polled, with a four-second delay between completed cycles.
+- Saved projects load 25 at a time with an explicit append/retry action. Workspace transcript reads use the segment-only SQL projection; word timings remain persisted for rendering and available through the full transcript response.
 - Polling stops at `READY`/`FAILED`. Explicit clip creation or retry restarts state loading and polling, so completion refreshes the saved clip and its preview/download links. POST requests are never retried automatically.
 - The original video uses the YouTube IFrame Player API and its video ID. Selecting a moment or transcript segment seeks that player. Generated clips use HTML video playback against the scoped API URL.
 - [errors.ts](frontend/src/errors.ts) maps stage/client error codes to local, application-owned messages. Network failures/timeouts display `Unable to reach the server. Please try again.`
@@ -276,7 +286,7 @@ Error handling spans the pipeline, API serialization, exception handlers, and fr
 | [backend/app/errors.py](backend/app/errors.py) | Public stage messages, safe client-error allowlist, database exception classification, and legacy stored-error classification |
 | [backend/app/api/errors.py](backend/app/api/errors.py) | Sanitize HTTP, request validation, database, and unhandled exceptions into public error envelopes |
 | [backend/app/schemas.py](backend/app/schemas.py) | API contracts and sanitization of failed project/clip rows, including legacy raw errors |
-| [backend/app/logging.py](backend/app/logging.py) | Stage events, project/clip context, and redacted exception/traceback diagnostics |
+| [backend/app/logging.py](backend/app/logging.py) | Stage events, project/clip context, redacted server diagnostics, and concise expected-client rejection events |
 | [frontend/src/errors.ts](frontend/src/errors.ts) | Safe local error display for API failures, proxy responses, and legacy/malformed error text |
 
 A persisted analysis failure includes:
@@ -298,7 +308,7 @@ Failure stages are `ingestion`, `fetching`, `transcription`, `analysis`, `render
 
 New failures store only canonical public messages in existing `error_message` fields. Serialization derives `failed_stage` and the structured `error` from those messages; these are not new database columns. Legacy raw errors are classified and sanitized on read without rewriting the rows. Technical exception details, provider execution IDs, credentials, and raw HTTP `detail` are not frontend error messages.
 
-Logs record project/clip IDs, stage started/completed/failed events, exception types, and redacted tracebacks. Credential fields, URLs, request/prompt/transcript payload fields, validation inputs, and SQL parameter dumps are redacted or excluded by the logging layer. Uvicorn exception diagnostics use the same redaction path, and routine HTTP client logs are reduced.
+Logs record project/clip IDs, stage started/completed/failed events, exception types, and redacted tracebacks. Credential fields, URLs, request/prompt/transcript payload fields, validation inputs, and SQL parameter dumps are redacted or excluded by the logging layer. Database driver diagnostics are reduced to exception class/SQLSTATE plus a short generic transport allowlist; arbitrary inline driver messages are not retained. Expected 4xx/507 request rejections are warning-level events without tracebacks. Uvicorn exception diagnostics use the same redaction path, and routine HTTP client logs are reduced.
 
 ## Implementation map
 

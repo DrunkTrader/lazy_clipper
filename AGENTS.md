@@ -3,9 +3,10 @@
 ## Repository shape
 
 - `backend/app/main.py` is the FastAPI entrypoint; routes live in `backend/app/api/routes.py`, and the persisted ingest/clip pipeline is in `backend/app/services/pipeline.py`.
-- Background processing is an in-process `ThreadPoolExecutor` with two workers, not a separate queue or worker service. Pipeline tasks use their own database sessions and persist stage status.
+- Background admission uses an in-process `ThreadPoolExecutor` with two workers and a bounded backlog, not a separate queue or worker service. Each thread supervises a Linux job process group with a parent-death guard and a pipeline child. Confirm group termination before releasing work or publishing retryability; a future timeout alone is insufficient. Pipeline tasks use their own database sessions and persist stage status.
 - PostgreSQL stores project metadata; media stays under `storage/projects/<project_id>/{source,audio,transcript,clips}`. The downloaded source is backend-only; the UI plays the original through YouTube and serves generated clips through scoped API routes.
-- There is no migration tool/configuration. Startup calls SQLAlchemy `create_all`; treat schema changes as requiring deliberate database migration handling rather than assuming existing tables are altered.
+- Storage admission uses configured tree/free-space budgets. Explicit project deletion quarantines one scoped directory before the database cascade; startup removes only known temporary/quarantine artifacts. Keep coordinated PostgreSQL metadata, globals, and media backups and restore-test them together. Reusable text artifacts are atomically published.
+- `backend/app/migrations.py` owns explicit transactional schema revisions. Startup initializes only fresh databases and verifies existing schemas; it never silently upgrades them. Back up/restore-test metadata and media, stop the API, and run `python -m backend.app.migrations upgrade` with the table owner's credentials before deploying a changed schema. Preserve the canonical source URL unique index and the atomic `analysis_completed` marker, including empty successful analysis.
 - `frontend/src` is a strict TypeScript React app built by Vite. The Docker frontend is a static Nginx image that proxies `/api/` to the `api` Compose service.
 
 ## Setup and runtime
@@ -13,9 +14,10 @@
 - Recommended local stack: copy `.env.example` to `.env` without overwriting an existing `.env`, configure `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`, then run `docker compose up -d --build --wait` from the repository root.
 - Inspect the stack with `docker compose ps` and `docker compose logs --tail=100 api frontend`; stop it with `docker compose down` (omit `--volumes` to preserve PostgreSQL/model caches and `storage/`).
 - Compose builds the pinned Python `yt-dlp`/`yt-dlp-ejs` dependencies and Node 22 into the API image; do not rely on a host-installed `yt-dlp` for container behavior. FFmpeg with libass subtitle support and `ffprobe` are also image dependencies.
+- The API image uses the checked-in `constraints.txt` resolution, including the CPU-only Torch/Torchaudio pair on x86 and ARM64. Do not blindly upgrade Python/transcription dependencies; update constraints deliberately, rebuild, and verify `pip check`, imports, model loading, and the real/synthetic media checks.
 - `VITE_API_BASE_URL` is embedded during the frontend image build. Leave it empty for the same-origin Nginx `/api` proxy; set it only for a separate API origin and rebuild.
 - `cookies.txt` is optional authentication material, mounted read-only in Compose and ignored when absent. Never commit it, put it in `.env`, copy it into an image, or log its contents.
-- For non-Compose development, Python 3.12+, PostgreSQL, and system FFmpeg with libass subtitle support are required; `whisper-timestamped` is optional unless running the real transcription pipeline:
+- For non-Compose development, Linux, Python 3.12+, PostgreSQL, and system FFmpeg with libass subtitle support are required; use the Linux Compose images on other host platforms. `whisper-timestamped` is optional unless running the real transcription pipeline:
   ```bash
   python3 -m venv .venv
   . .venv/bin/activate

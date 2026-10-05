@@ -1,12 +1,12 @@
 import { getProjectStatus, ProjectStatus } from './api'
 import { ApiError } from './errors'
 
-// A single status request drives updates, including clip rendering. Full data is
-// read on opening/reloading and once after a terminal transition, never per tick.
+// A single status request drives updates. Refresh boundaries receive the observed
+// status so the workspace can reuse saved content during clip-only updates.
 export function watchProject(projectId: string, callbacks: {
   onStatus: (status: ProjectStatus) => void
   onError: (error: unknown) => void
-  onRefresh: () => Promise<void>
+  onRefresh: (status: ProjectStatus | null) => Promise<void>
 }): () => void {
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -18,12 +18,12 @@ export function watchProject(projectId: string, callbacks: {
       if (stopped) return
       callbacks.onStatus(status)
       terminal = ['READY', 'COMPLETED', 'DONE', 'FAILED', 'ERROR', 'CANCELLED'].includes((status.status ?? '').toUpperCase())
-      if (initial || terminal) await callbacks.onRefresh()
+      if (initial || terminal) await callbacks.onRefresh(status)
     } catch (error) {
       if (stopped) return
       callbacks.onError(error)
       terminal = error instanceof ApiError && error.status >= 400 && error.status < 500
-      if (initial) await callbacks.onRefresh()
+      if (initial) await callbacks.onRefresh(null)
     } finally {
       if (!stopped && !terminal) timer = setTimeout(() => void poll(false), 4000)
     }

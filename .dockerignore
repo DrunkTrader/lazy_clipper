@@ -1,6 +1,7 @@
 .git
 .env
 .env.*
+.secrets
 cookies.txt
 *.cookies.txt
 **/cookies.txt

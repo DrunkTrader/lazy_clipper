@@ -8,7 +8,9 @@ import re
 import shutil
 
 from ..config import Settings, get_settings
+from ..errors import WorkloadLimitError
 from ..logging import logger
+from .limits import require_source_duration
 
 
 class MediaDependencyError(RuntimeError):
@@ -105,7 +107,7 @@ class YoutubeService:
             "fragment_retries": 2,
             "extractor_retries": 2,
             "socket_timeout": _DOWNLOAD_TIMEOUT,
-            "match_filter": YoutubeService._live_match_filter,
+            "match_filter": self._live_match_filter if skip_download else self._duration_match_filter,
             # yt-dlp-ejs uses the configured runtime to solve YouTube's
             # current JavaScript challenges. This is intentionally a runtime
             # name, never a developer-specific absolute path.
@@ -148,6 +150,17 @@ class YoutubeService:
             return "Live streams are not supported"
         return None
 
+    def _duration_match_filter(self, info: dict, *, incomplete: bool = False) -> str | None:
+        live_error = self._live_match_filter(info, incomplete=incomplete)
+        if live_error:
+            return live_error
+        if not incomplete:
+            try:
+                require_source_duration(info.get("duration"), self.settings.max_source_seconds)
+            except WorkloadLimitError as exc:
+                return str(exc)
+        return None
+
     def get_metadata(self, url: str) -> VideoMetadata:
         video_id = validate_youtube_url(url)
         yt_dlp = self._module()
@@ -156,10 +169,11 @@ class YoutubeService:
                 with yt_dlp.YoutubeDL(options) as downloader:
                     info = downloader.extract_info(_canonical_video_url(video_id), download=False)
             self._reject_live(info)
+            require_source_duration(info.get("duration"), self.settings.max_source_seconds)
             actual_id = str(info.get("id") or video_id)
             if actual_id != video_id:
                 raise MediaDependencyError("YouTube returned a different video id")
-        except MediaDependencyError:
+        except (MediaDependencyError, WorkloadLimitError):
             raise
         except Exception as exc:
             raise MediaDependencyError(f"Could not read YouTube metadata: {exc}") from exc
