@@ -20,6 +20,7 @@ import {
 } from './api'
 import { errorMessage, publicError, stageMessages } from './errors'
 import { watchProject } from './projectUpdates'
+import { EmptyProjects, EmptyWorkspace, Footer, Header, Hero, IconArrow, IconFilm, IconLink, IconX } from './WorkspaceChrome'
 import './styles.css'
 
 type Selection = { id?: string; start: number; end?: number; label: string } | null
@@ -198,6 +199,8 @@ function App() {
   const youtubeId = getString(asRecord(project?.video).youtube_id)
   const title = getString(project?.title) ?? getString(asRecord(project?.video).title) ?? 'Untitled project'
   const sourceUrl = getString(project?.source_url) ?? getString(project?.url)
+  const apiConnection = savedProjectsError || projectError || statusError ? 'unavailable'
+    : savedProjectsLoading && savedProjects.length === 0 ? 'connecting' : 'connected'
   const statusMessage = failed
     ? publicError(status)
     : ({ QUEUED: 'Waiting for processing.', INGESTING: 'Fetching and preparing the video.',
@@ -235,6 +238,7 @@ function App() {
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (creating) return
     const trimmedUrl = url.trim()
     if (!trimmedUrl) {
       setCreateError('Enter a video URL to create a project.')
@@ -318,51 +322,57 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="site-header">
-        <div>
-          <p className="eyebrow">VIDEO WORKSPACE</p>
-          <h1>Lazy Clipper</h1>
-          <p className="subtitle">Find the moments worth keeping.</p>
-        </div>
-        <div className="api-indicator"><span className="status-dot" /> Live API</div>
-      </header>
+    <main className="app-shell" id="top">
+      <a className="skip-link" href="#main-content">Skip to content</a>
+      <Header connection={apiConnection} />
 
-      <section className="create-panel panel">
-        <div>
-          <p className="eyebrow">NEW PROJECT</p>
-          <h2>Start with a video URL</h2>
+      <div id="main-content" tabIndex={-1}>
+        {!projectId && <Hero />}
+
+      <section className="create-panel panel glass-panel" id="new-project" aria-labelledby="new-project-heading">
+        <div className="create-copy">
+          <p className="eyebrow">NEW PROJECT <span className="eyebrow-line" /></p>
+          <h2 id="new-project-heading">Start with a video</h2>
           <p className="muted">The API will ingest the video, transcribe it, and identify moments.</p>
         </div>
         <form className="create-form" onSubmit={handleCreate}>
           <label htmlFor="video-url">Video URL</label>
           <div className="form-row">
-            <input
-              id="video-url"
-              type="url"
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder="https://www.youtube.com/watch?v=..."
-              disabled={creating}
-            />
-            <button type="submit" disabled={creating}>{creating ? 'Creating…' : 'Create project'}</button>
+            <div className="url-control">
+              <IconLink />
+              <input
+                id="video-url"
+                type="url"
+                value={url}
+                onChange={(event) => { setUrl(event.target.value); setCreateError(null) }}
+                placeholder="https://www.youtube.com/watch?v=..."
+                disabled={creating}
+                aria-invalid={!!createError}
+                aria-describedby={createError ? 'create-error' : undefined}
+              />
+              {url && <button type="button" className="input-clear" aria-label="Clear video URL" disabled={creating} onClick={() => { setUrl(''); setCreateError(null) }}><IconX /></button>}
+            </div>
+            <button type="submit" disabled={creating}>{creating ? 'Creating project…' : <>Create project <span aria-hidden="true">→</span></>}</button>
           </div>
-          {createError && <p className="error-text" role="alert">{createError}</p>}
+          {createError && <p className="error-text" id="create-error" role="alert">{createError}</p>}
         </form>
       </section>
 
-      <details className="saved-projects panel">
-        <summary>Saved projects</summary>
+      <details className="saved-projects panel" id="recent-projects" open>
+        <summary><span><span className="eyebrow">LIBRARY</span><strong>Recent projects</strong></span><span className="summary-meta">{savedProjects.length ? `${savedProjects.length}${hasMoreProjects ? '+' : ''} saved` : 'Your archive'}</span></summary>
         {savedProjectsLoading && <p className="muted">Loading saved projects…</p>}
         {savedProjectsError && <p className="error-text" role="alert">Could not load saved projects: {savedProjectsError}</p>}
-        {!savedProjectsLoading && !savedProjectsError && savedProjects.length === 0 && <p className="muted">No saved projects yet.</p>}
+        {savedProjectsLoading && <div className="project-skeletons" aria-hidden="true"><span /><span /><span /></div>}
+        {!savedProjectsLoading && !savedProjectsError && savedProjects.length === 0 && <EmptyProjects />}
         <ul className="saved-project-list">
           {savedProjects.map((savedProject) => {
             const id = savedProject.id
             if (!id) return null
             const savedTitle = getString(savedProject.title) ?? getString(asRecord(savedProject.video).title)
               ?? getString(savedProject.source_url) ?? id
-            return <li key={id}>
+            const video = asRecord(savedProject.video)
+            const thumbnail = getString(video.thumbnail_url)
+            return <li key={id} className="saved-project-card">
               <a
                 href={`?project_id=${encodeURIComponent(id)}`}
                 aria-current={id === projectId ? 'page' : undefined}
@@ -371,7 +381,10 @@ function App() {
                   navigateToProject(id)
                 }}
               >{savedTitle}</a>
-              <span className="muted">{getString(savedProject.status)?.toUpperCase() ?? 'UNKNOWN'}</span>
+              <span className="project-card-art" aria-hidden="true">{thumbnail ? <img src={thumbnail} alt="" loading="lazy" /> : <IconFilm />}</span>
+              <span className="project-card-source">{typeof video.duration === 'number' ? `${formatTime(video.duration)} · ` : ''}{formatDate(savedProject.created_at) ?? 'Video project'}</span>
+              <IconArrow />
+              <span className={`project-status ${getString(savedProject.status)?.toLowerCase() ?? 'unknown'}`}><span className="status-dot" />{getString(savedProject.status)?.toUpperCase() ?? 'UNKNOWN'}</span>
             </li>
           })}
         </ul>
@@ -382,7 +395,7 @@ function App() {
 
       {projectId && (
         <section className="workspace">
-          {projectLoading && !project && <div className="panel loading-state">Loading project…</div>}
+          {projectLoading && !project && <div className="panel loading-state" role="status">Loading project…</div>}
           {(projectError || statusError) && <div className="alert error-box" role="alert"><strong>Could not load project.</strong> {projectError ?? statusError}</div>}
 
           {project && (
@@ -390,7 +403,7 @@ function App() {
               <section className="project-heading panel">
                 <div>
                   <p className="eyebrow">PROJECT</p>
-                  <h2>{title}</h2>
+                  <h1>{title}</h1>
                   <p className="project-id">ID: {project.id ?? projectId}</p>
                 </div>
                 <div className="project-heading-actions">
@@ -507,7 +520,7 @@ function App() {
                     {sortedTranscript.map((segment, index) => {
                       const start = segment.start
                       const end = segment.end
-                      return <button className="transcript-row" key={getString(segment.id) ?? `${start ?? index}-${index}`} onClick={() => seekTo(start, end, `Transcript at ${formatTime(start)}`)} disabled={start === undefined}>
+                      return <button className="transcript-row" key={getString(segment.id) ?? `${start ?? index}-${index}`} aria-pressed={selected?.label === `Transcript at ${formatTime(start)}`} onClick={() => seekTo(start, end, `Transcript at ${formatTime(start)}`)} disabled={start === undefined}>
                         <span className="timestamp">{formatTime(start)}</span>
                         <span className="transcript-copy">{segment.speaker && <strong>{segment.speaker}: </strong>}{segment.text || '—'}</span>
                       </button>
@@ -520,7 +533,10 @@ function App() {
         </section>
       )}
 
-      {!projectId && <div className="welcome-empty panel"><p className="eyebrow">READY WHEN YOU ARE</p><h2>Create a project to inspect its video.</h2><p className="muted">Nothing is shown until the API returns a real project.</p></div>}
+      {!projectId && <EmptyWorkspace />}
+      </div>
+
+      <Footer />
     </main>
   )
 }
