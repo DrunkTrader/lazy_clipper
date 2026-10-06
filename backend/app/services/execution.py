@@ -121,12 +121,6 @@ class JobSupervisor:
         self.settings = settings
         self.stop = Event()
 
-    def ingest(self, project_id: str) -> None:
-        self.run(project_id)
-
-    def render(self, project_id: str, clip_id: str) -> None:
-        self.run(project_id, clip_id)
-
     def run(self, project_id: str, clip_id: str | None = None) -> None:
         from ..logging import log_failure
 

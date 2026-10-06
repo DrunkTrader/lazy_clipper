@@ -48,11 +48,6 @@ class CandidateMoment(StructuredModel):
         return value
 
 
-class CandidateResponse(StructuredModel):
-    # Missing output is a provider error, not evidence that a video has no clips.
-    candidates: list[CandidateMoment]
-
-
 class DetectedCandidate(StructuredModel):
     start_segment: int = Field(ge=0, strict=True)
     end_segment: int = Field(ge=0, strict=True)
@@ -88,13 +83,9 @@ class ValidationResponse(StructuredModel):
             raise ValueError("Reviews must uniquely match every proposed candidate ID")
 
 
-def calculate_composite_score(scores: CandidateScores | dict[str, float]) -> float:
-    values = scores if isinstance(scores, dict) else scores.model_dump()
+def calculate_composite_score(scores: CandidateScores) -> float:
+    values = scores.model_dump()
     return round(sum(DIMENSION_WEIGHTS[name] * float(values[name]) for name in DIMENSION_WEIGHTS), 4)
-
-
-# Short alias used by integrations.
-composite_score = calculate_composite_score
 
 
 def _overlap_ratio(left: Any, right: Any) -> float:

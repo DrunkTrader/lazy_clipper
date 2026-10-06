@@ -165,52 +165,6 @@ class Pipeline:
             if session is not None:
                 session.close()
 
-    def _render_clips(self, session: Session, project: Project) -> None:
-        """Render all saved moments for an explicit legacy/backfill call.
-
-        Normal ingestion never calls this method. New clip requests use
-        :meth:`render_clip` so selecting one moment only renders that moment.
-        """
-        root = self.settings.project_storage(project.id)
-        clips = {clip.moment_id: clip for clip in project.clips}
-        for moment in project.moments:
-            if moment.id not in clips:
-                clip = Clip(project_id=project.id, moment_id=moment.id, start=moment.start, end=moment.end)
-                session.add(clip)
-                clips[moment.id] = clip
-        session.commit()
-
-        source_path = existing_file(project.video.source_path) if project.video else None
-        for index, clip in enumerate(clips.values(), 1):
-            if clip.status == "READY" and existing_file(clip.output_path):
-                continue
-            clip.status = "RENDERING"
-            clip.error_message = None
-            clip.output_path = None
-            self._status(session, project, "RENDERING", f"Rendering vertical clip {index} of {len(clips)}")
-            log_stage(project.id, "rendering", "started", clip.id)
-            project_id, clip_id = project.id, clip.id
-            try:
-                if source_path is None:
-                    raise RuntimeError("Source video file is missing; clip cannot be rendered")
-                duration = project.video.duration
-                if duration is not None and (clip.start >= duration or clip.end > duration + 0.1):
-                    raise ValueError("Clip timestamps exceed the source video duration")
-                output = self._render_clip_media(project, clip, source_path, root)
-                clip.output_path = str(output)
-                clip.status = "READY"
-                session.commit()
-                log_stage(project.id, "rendering", "completed", clip.id)
-            except Exception as exc:
-                # A bad range or encoder failure must not discard other clips.
-                self._fail_clip(session, project_id, clip_id, exc)
-
-        failed = sum(clip.status == "FAILED" for clip in clips.values())
-        message = f"Processing complete: {len(clips) - failed} clips ready"
-        if failed:
-            message += f", {failed} failed (retry clip generation to try again)"
-        self._status(session, project, "READY", message)
-
     def render_clip(self, project_id: str, clip_id: str) -> None:
         """Render one persisted clip request using the downloaded source."""
         session = None
@@ -313,30 +267,3 @@ class Pipeline:
                 session.commit()
         except Exception as persist_exc:
             log_failure(persist_exc, project_id=project_id, clip_id=clip_id, stage="database", context="PERSIST_FAILURE")
-
-    def render_clips(self, project_id: str) -> None:
-        """Explicit backfill/retry for saved moments, never ingest or analyze."""
-        session = None
-        try:
-            session = self.make_session()
-            project = session.get(Project, project_id)
-            if project is not None:
-                self._render_clips(session, project)
-        except Exception as exc:
-            self._fail(session, project_id, exc, "rendering")
-        finally:
-            if session is not None:
-                session.close()
-
-
-def run_pipeline(project_id: str) -> None:
-    """Entry point suitable for the existing thread executor."""
-    Pipeline().run(project_id)
-
-
-def render_project_clips(project_id: str) -> None:
-    Pipeline().render_clips(project_id)
-
-
-def render_project_clip(project_id: str, clip_id: str) -> None:
-    Pipeline().render_clip(project_id, clip_id)

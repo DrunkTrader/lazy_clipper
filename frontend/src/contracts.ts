@@ -1,5 +1,5 @@
 // Validate the fields consumed by the workspace; tolerate additive API fields.
-import type { ClipsResponse, GeneratedClip, JsonObject, Moment, Project, ProjectStatus, TranscriptSegment } from './api'
+import type { ClipsResponse, GeneratedClip, IngestResponse, JsonObject, Moment, MomentsResponse, Project, ProjectStatus, TranscriptResponse, TranscriptSegment } from './api'
 import { stageMessages } from './errors'
 
 const projectStates = ['QUEUED', 'INGESTING', 'TRANSCRIBING', 'ANALYZING', 'RENDERING', 'READY', 'FAILED']
@@ -40,7 +40,7 @@ export function isProjectStatus(value: unknown): value is ProjectStatus {
   return object(value) && identity(value.project_id) && state(value.status) && nullableString(value.message) && failure(value)
 }
 
-export function isIngest(value: unknown): value is JsonObject {
+export function isIngest(value: unknown): value is IngestResponse {
   return object(value) && identity(value.project_id) && string(value.status) && state(value.status.toUpperCase())
 }
 
@@ -70,5 +70,5 @@ function moment(value: unknown): value is Moment {
     && string(value.description) && string(value.reason) && number(value.score)
 }
 
-export const isTranscript = (value: unknown): value is JsonObject => envelope(value, 'segments', segment)
-export const isMoments = (value: unknown): value is JsonObject => envelope(value, 'moments', moment)
+export const isTranscript = (value: unknown): value is TranscriptResponse => envelope(value, 'segments', segment)
+export const isMoments = (value: unknown): value is MomentsResponse => envelope(value, 'moments', moment)

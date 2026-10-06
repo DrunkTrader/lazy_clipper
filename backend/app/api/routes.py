@@ -248,7 +248,7 @@ def get_clips(project_id: str, request: Request, session: Session = Depends(get_
     clips = session.query(Clip).join(Moment).filter(Clip.project_id == project_id).order_by(Moment.rank).all()
     responses = []
     for clip in clips:
-        response = _clip_response(clip, request)
+        response = _clip_response(clip)
         if clip.status == "READY":
             if not _media_path(project_id, clip.output_path, "clips"):
                 # Keep GETs read-only, but do not advertise an unplayable file.
@@ -293,7 +293,7 @@ def create_clip(
         if clip is not None and clip.status == "READY" and _media_path(project_id, clip.output_path, "clips") and (
             clip.start == payload.start and clip.end == payload.end
         ):
-            return _clip_response(clip, request)
+            return _clip_response(clip)
         with _admit(request, project_id) as slot:
             if clip is None:
                 clip = Clip(project_id=project_id, moment_id=moment.id)
@@ -319,11 +319,10 @@ def create_clip(
                 project.status_message = clip.error_message
                 session.commit()
                 raise HTTPException(status_code=503, detail=project.status_message) from exc
-        return _clip_response(clip, request)
+        return _clip_response(clip)
 
 
-def _clip_response(clip: Clip, request: Request) -> ClipResponse:
-    del request
+def _clip_response(clip: Clip) -> ClipResponse:
     response = ClipResponse.model_validate(clip)
     if clip.status == "READY":
         response.media_url = f"/api/v1/projects/{clip.project_id}/clips/{clip.id}/media"

@@ -56,7 +56,3 @@ class WhisperTimestampedTranscriber:
             raise
         except Exception as exc:
             raise TranscriptionError(f"whisper-timestamped transcription failed: {exc}") from exc
-
-
-# Keep the original import name available to callers from the initial MVP.
-WhisperXTranscriber = WhisperTimestampedTranscriber

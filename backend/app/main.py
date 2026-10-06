@@ -43,8 +43,8 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_executor = executor
     app.state.job_supervisor = supervisor
     app.state.admission = admission
-    app.state.pipeline_runner = supervisor.ingest
-    app.state.clip_runner = supervisor.render
+    app.state.pipeline_runner = supervisor.run
+    app.state.clip_runner = supervisor.run
     try:
         yield
     finally:

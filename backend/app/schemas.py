@@ -53,9 +53,6 @@ class VideoResponse(BaseModel):
     title: str | None = None
     duration: float | None = None
     thumbnail_url: str | None = None
-    # Kept as a null-compatible field for older clients. The downloaded source
-    # video is intentionally never exposed as a frontend media URL.
-    media_url: str | None = None
 
 
 class ProjectResponse(FailureFields):
