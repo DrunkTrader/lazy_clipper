@@ -194,8 +194,3 @@ def chunk_segments(
             break
         start = end - overlap_seconds
     return windows
-
-
-# Descriptive aliases make the utility convenient for callers and tests.
-normalize_transcript = normalize_segments
-chunk_transcript = chunk_segments

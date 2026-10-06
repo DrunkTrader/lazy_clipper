@@ -117,14 +117,6 @@ class LLMClient:
         )
         return ValidationResponse.model_validate(payload)
 
-    # Kept as a narrow compatibility helper for integrations from the initial MVP.
-    def complete_json(self, transcript: str, window_start: float, window_end: float) -> dict[str, Any]:
-        return self._json_completion(
-            [{"role": "system", "content": "Return a JSON object with a candidates array."}, {"role": "user", "content": transcript}],
-            "completion",
-        )
-
-
 def _read_prompt(name: str) -> str:
     return (_PROMPTS / name).read_text(encoding="utf-8")
 

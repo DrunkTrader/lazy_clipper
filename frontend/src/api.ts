@@ -3,8 +3,12 @@ import { isClip, isClips, isIngest, isMoments, isProject, isProjects, isProjectS
 
 export type JsonObject = Record<string, unknown>
 
+export type IngestResponse = {
+  project_id: string
+  status: string
+}
+
 export type Project = JsonObject & FailureFields & {
-  project_id?: string
   id?: string
   title?: string
   source_url?: string
@@ -26,6 +30,11 @@ export type TranscriptSegment = JsonObject & {
   speaker?: string
 }
 
+export type TranscriptResponse = {
+  project_id: string
+  segments: TranscriptSegment[]
+}
+
 export type Moment = JsonObject & {
   id?: string
   title?: string
@@ -34,6 +43,11 @@ export type Moment = JsonObject & {
   end?: number
   score?: number
   reason?: string
+}
+
+export type MomentsResponse = {
+  project_id: string
+  moments: Moment[]
 }
 
 export type ClipStatus = 'QUEUED' | 'RENDERING' | 'READY' | 'FAILED'
@@ -103,8 +117,8 @@ async function request<T>(path: string, stage: FailureStage, valid: (value: unkn
   }
 }
 
-export function createProject(url: string): Promise<JsonObject> {
-  return request<JsonObject>('/api/v1/ingest', 'ingestion', isIngest, {
+export function createProject(url: string): Promise<IngestResponse> {
+  return request<IngestResponse>('/api/v1/ingest', 'ingestion', isIngest, {
     method: 'POST',
     body: JSON.stringify({ url }),
   })
@@ -126,14 +140,14 @@ export function getProjectStatus(projectId: string): Promise<ProjectStatus> {
     (value): value is ProjectStatus => isProjectStatus(value) && value.project_id === projectId)
 }
 
-export function getTranscript(projectId: string): Promise<unknown> {
-  return request<JsonObject>(`/api/v1/projects/${encodeURIComponent(projectId)}/transcript?include_words=false`, 'database',
-    (value): value is JsonObject => isTranscript(value) && value.project_id === projectId)
+export function getTranscript(projectId: string): Promise<TranscriptResponse> {
+  return request<TranscriptResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/transcript?include_words=false`, 'database',
+    (value): value is TranscriptResponse => isTranscript(value) && value.project_id === projectId)
 }
 
-export function getMoments(projectId: string): Promise<unknown> {
-  return request<JsonObject>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`, 'database',
-    (value): value is JsonObject => isMoments(value) && value.project_id === projectId)
+export function getMoments(projectId: string): Promise<MomentsResponse> {
+  return request<MomentsResponse>(`/api/v1/projects/${encodeURIComponent(projectId)}/moments`, 'database',
+    (value): value is MomentsResponse => isMoments(value) && value.project_id === projectId)
 }
 
 export function getClips(projectId: string): Promise<ClipsResponse> {
@@ -162,29 +176,6 @@ export function asRecord(value: unknown): JsonObject {
 
 export function getString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
-}
-
-export function getNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value)
-  return undefined
-}
-
-export function extractProjectId(value: unknown): string | undefined {
-  const record = asRecord(value)
-  return getString(record.project_id) ?? getString(record.id)
-}
-
-export function extractItems(value: unknown, keys: string[]): JsonObject[] {
-  if (Array.isArray(value)) return value.filter((item): item is JsonObject => typeof item === 'object' && item !== null)
-  const record = asRecord(value)
-  for (const key of keys) {
-    const items = record[key]
-    if (Array.isArray(items)) {
-      return items.filter((item): item is JsonObject => typeof item === 'object' && item !== null)
-    }
-  }
-  return []
 }
 
 export function formatTime(seconds: number | undefined): string {

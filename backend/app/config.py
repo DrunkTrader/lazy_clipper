@@ -13,7 +13,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True)
 
-    app_name: str = "LazyClipper API"
     database_url: str = Field(default="postgresql+psycopg://lazyclipper@localhost:5432/lazy_clipper", repr=False)
     database_password_file: Path | None = None
     cors_allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"])
@@ -22,7 +21,6 @@ class Settings(BaseSettings):
     storage_min_free_bytes: int = Field(default=1024**3, ge=0)
     storage_job_reserve_bytes: int = Field(default=1024**3, gt=0)
     ffmpeg_binary: str = "ffmpeg"
-    yt_dlp_binary: str = "yt-dlp"
     ytdlp_js_runtime: str = Field(default="node", min_length=1)
     ytdlp_cookie_file: Path | None = None
     whisper_model: str = "small"
@@ -73,10 +71,6 @@ class Settings(BaseSettings):
         if self.transcript_overlap_seconds >= self.transcript_chunk_seconds:
             raise ValueError("TRANSCRIPT_OVERLAP_SECONDS must be less than TRANSCRIPT_CHUNK_SECONDS")
         return self
-
-    @property
-    def database_is_sqlite(self) -> bool:
-        return self.database_url.startswith("sqlite")
 
     def project_storage(self, project_id: str) -> Path:
         from .services.storage import project_root

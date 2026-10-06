@@ -1,7 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   GeneratedClip,
-  JsonObject,
   Moment,
   Project,
   ProjectStatus,
@@ -11,11 +10,8 @@ import {
   createClip,
   createProject,
   deleteProject,
-  extractItems,
-  extractProjectId,
   formatTime,
   getClips,
-  getNumber,
   getProject,
   getProjects,
   getMoments,
@@ -28,47 +24,12 @@ import './styles.css'
 
 type Selection = { id?: string; start: number; end?: number; label: string } | null
 
-function readTime(item: JsonObject, names: string[]): number | undefined {
-  for (const name of names) {
-    const value = getNumber(item[name])
-    if (value !== undefined) return value
-  }
-  return undefined
-}
-
-function normalizeTranscript(value: unknown): TranscriptSegment[] {
-  return extractItems(value, ['segments', 'transcript', 'items']).map((item) => ({
-    ...item,
-    start: readTime(item, ['start', 'start_time', 'timestamp']),
-    end: readTime(item, ['end', 'end_time']),
-    text: getString(item.text) ?? getString(item.content) ?? '',
-    speaker: getString(item.speaker),
-  }))
-}
-
-function normalizeMoments(value: unknown): Moment[] {
-  return extractItems(value, ['moments', 'items']).map((item) => ({
-    ...item,
-    start: readTime(item, ['start', 'start_time']),
-    end: readTime(item, ['end', 'end_time']),
-    title: getString(item.title) ?? 'Untitled moment',
-    description: getString(item.description),
-    reason: getString(item.reason),
-    score: getNumber(item.score),
-  }))
-}
-
-function statusName(status: ProjectStatus | null): string {
-  const name = (getString(status?.status) ?? 'UNKNOWN').toUpperCase()
-  return ['QUEUED', 'INGESTING', 'TRANSCRIBING', 'ANALYZING', 'RENDERING', 'READY', 'COMPLETED', 'DONE', 'FAILED', 'ERROR', 'CANCELLED'].includes(name) ? name : 'UNKNOWN'
-}
-
 function isReady(status: string): boolean {
-  return ['READY', 'COMPLETED', 'DONE'].includes(status)
+  return status === 'READY'
 }
 
 function isFailed(status: string): boolean {
-  return ['FAILED', 'ERROR', 'CANCELLED'].includes(status)
+  return status === 'FAILED'
 }
 
 function App() {
@@ -102,9 +63,10 @@ function App() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Selection>(null)
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null)
+  const projectRef = useRef<Project | null>(null)
   const activeProjectId = useRef(projectId)
   const contentLoadedFor = useRef<string | null>(null)
-  const currentStatus = statusName(status)
+  const currentStatus = status?.status ?? 'UNKNOWN'
 
   useEffect(() => {
     activeProjectId.current = projectId
@@ -155,10 +117,31 @@ function App() {
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
+    let initialRefreshComplete = false
+    let projectRefreshInFlight = false
+    projectRef.current = null
     setProjectLoading(true)
     setClipsLoading(true)
     setStatusStale(false)
     setContentLoading(contentLoadedFor.current !== projectId)
+
+    const loadProject = async () => {
+      if (projectRefreshInFlight) return
+      projectRefreshInFlight = true
+      try {
+        const nextProject = await getProject(projectId)
+        if (cancelled) return
+        projectRef.current = nextProject
+        setProject(nextProject)
+        setProjectError(null)
+      } catch (error) {
+        if (!cancelled) setProjectError(errorMessage(error))
+      } finally {
+        projectRefreshInFlight = false
+        if (!cancelled) setProjectLoading(false)
+      }
+    }
+
     const stop = watchProject(projectId, {
       onStatus: (nextStatus) => {
         if (['QUEUED', 'INGESTING', 'TRANSCRIBING', 'ANALYZING'].includes(nextStatus.status ?? '')) {
@@ -167,6 +150,10 @@ function App() {
         setStatus(nextStatus)
         setStatusError(null)
         setSavedProjects((current) => current.map((item) => item.id === projectId ? { ...item, status: nextStatus.status } : item))
+        const terminal = nextStatus.status === 'READY' || nextStatus.status === 'FAILED'
+        if (initialRefreshComplete && !terminal && !getString(asRecord(projectRef.current?.video).youtube_id)) {
+          void loadProject()
+        }
       },
       onStale: () => setStatusStale(true),
       onError: (error) => setStatusError(errorMessage(error)),
@@ -174,19 +161,11 @@ function App() {
         const reuseContent = contentLoadedFor.current === projectId
         if (!reuseContent) setContentLoading(true)
         await Promise.all([
-          getProject(projectId).then((nextProject) => {
-            if (cancelled) return
-            setProject(nextProject)
-            setProjectError(null)
-          }).catch((error) => {
-            if (!cancelled) setProjectError(errorMessage(error))
-          }).finally(() => {
-            if (!cancelled) setProjectLoading(false)
-          }),
+          loadProject(),
           reuseContent ? Promise.resolve() : Promise.all([getTranscript(projectId), getMoments(projectId)]).then(([nextTranscript, nextMoments]) => {
             if (cancelled) return
-            setTranscript(normalizeTranscript(nextTranscript))
-            setMoments(normalizeMoments(nextMoments))
+            setTranscript(nextTranscript.segments)
+            setMoments(nextMoments.moments)
             if (['READY', 'RENDERING', 'FAILED'].includes(nextStatus?.status ?? '')) contentLoadedFor.current = projectId
             setContentError(null)
           }).catch((error) => {
@@ -205,6 +184,7 @@ function App() {
             if (!cancelled) setClipsLoading(false)
           }),
         ])
+        initialRefreshComplete = true
       },
     })
     return () => {
@@ -234,6 +214,25 @@ function App() {
     setSelected({ id, start, end, label })
   }
 
+  function navigateToProject(nextProjectId: string) {
+    contentLoadedFor.current = null
+    projectRef.current = null
+    setProject(null)
+    setStatus(null)
+    setTranscript([])
+    setMoments([])
+    setClips([])
+    setClipsLoading(true)
+    setClipsLoaded(false)
+    setClipsError(null)
+    setProjectError(null)
+    setStatusError(null)
+    setContentError(null)
+    setSelected(null)
+    setProjectId(nextProjectId)
+    window.history.replaceState({}, '', `${window.location.pathname}?project_id=${encodeURIComponent(nextProjectId)}`)
+  }
+
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const trimmedUrl = url.trim()
@@ -255,23 +254,11 @@ function App() {
     setContentError(null)
     try {
       const response = await createProject(trimmedUrl)
-      const newProjectId = extractProjectId(response)
-      if (!newProjectId) throw new Error('The API did not return a project_id.')
-      contentLoadedFor.current = null
-      setProject(null)
-      setStatus(null)
-      setTranscript([])
-      setMoments([])
-      setClips([])
-      setClipsLoading(true)
-      setClipsLoaded(false)
-      setClipsError(null)
+      const newProjectId = response.project_id
+      navigateToProject(newProjectId)
       setCreatingClipId(null)
       setClipCreationError(null)
-      setSelected(null)
-      setProjectId(newProjectId)
       setRefreshVersion((version) => version + 1)
-      window.history.replaceState({}, '', `${window.location.pathname}?project_id=${encodeURIComponent(newProjectId)}`)
     } catch (error) {
       setCreateError(errorMessage(error))
     } finally {
@@ -314,7 +301,7 @@ function App() {
     setDeleteError(null)
     try {
       await deleteProject(requestedProjectId)
-      setSavedProjects((current) => current.filter((item) => extractProjectId(item) !== requestedProjectId))
+      setSavedProjects((current) => current.filter((item) => item.id !== requestedProjectId))
       setProject(null)
       setStatus(null)
       setTranscript([])
@@ -371,12 +358,19 @@ function App() {
         {!savedProjectsLoading && !savedProjectsError && savedProjects.length === 0 && <p className="muted">No saved projects yet.</p>}
         <ul className="saved-project-list">
           {savedProjects.map((savedProject) => {
-            const id = extractProjectId(savedProject)
+            const id = savedProject.id
             if (!id) return null
             const savedTitle = getString(savedProject.title) ?? getString(asRecord(savedProject.video).title)
               ?? getString(savedProject.source_url) ?? id
             return <li key={id}>
-              <a href={`?project_id=${encodeURIComponent(id)}`} aria-current={id === projectId ? 'page' : undefined}>{savedTitle}</a>
+              <a
+                href={`?project_id=${encodeURIComponent(id)}`}
+                aria-current={id === projectId ? 'page' : undefined}
+                onClick={(event) => {
+                  event.preventDefault()
+                  navigateToProject(id)
+                }}
+              >{savedTitle}</a>
               <span className="muted">{getString(savedProject.status)?.toUpperCase() ?? 'UNKNOWN'}</span>
             </li>
           })}
@@ -397,7 +391,7 @@ function App() {
                 <div>
                   <p className="eyebrow">PROJECT</p>
                   <h2>{title}</h2>
-                  <p className="project-id">ID: {getString(project.project_id) ?? getString(project.id) ?? projectId}</p>
+                  <p className="project-id">ID: {project.id ?? projectId}</p>
                 </div>
                 <div className="project-heading-actions">
                   <div className={`status-pill ${failed ? 'failed' : isReady(currentStatus) ? 'ready' : ''}`}>
@@ -450,7 +444,7 @@ function App() {
               <section className="video-section panel">
                 <div className="section-heading"><div><p className="eyebrow">SOURCE VIDEO</p><h2>Preview</h2></div>{selected && <span className="selection-label">Selected: {selected.label}</span>}</div>
                 {youtubeId ? (
-                  <YoutubePlayer videoId={youtubeId} selection={selected} playerRef={youtubePlayerRef} />
+                  <YoutubePlayer key={`${projectId}:${youtubeId}`} videoId={youtubeId} selection={selected} playerRef={youtubePlayerRef} />
                 ) : (
                   <div className="empty-state video-unavailable">
                     <strong>No YouTube video ID was returned by the API.</strong>

@@ -17,8 +17,8 @@ export function watchProject(projectId: string, callbacks: {
   let lastStatus: string | null = null
 
   function scheduleStale(status: ProjectStatus) {
-    const name = (status.status ?? '').toUpperCase()
-    const terminal = ['READY', 'COMPLETED', 'DONE', 'FAILED', 'ERROR', 'CANCELLED'].includes(name)
+    const name = status.status ?? ''
+    const terminal = name === 'READY' || name === 'FAILED'
     if (terminal) {
       clearTimeout(staleTimer)
       staleTimer = undefined
@@ -42,7 +42,7 @@ export function watchProject(projectId: string, callbacks: {
       if (stopped) return
       callbacks.onStatus(status)
       scheduleStale(status)
-      terminal = ['READY', 'COMPLETED', 'DONE', 'FAILED', 'ERROR', 'CANCELLED'].includes((status.status ?? '').toUpperCase())
+      terminal = status.status === 'READY' || status.status === 'FAILED'
       if (initial || terminal) await callbacks.onRefresh(status)
     } catch (error) {
       if (stopped) return

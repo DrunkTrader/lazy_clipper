@@ -179,7 +179,7 @@ Failures elsewhere in the render path are handled by the same per-clip failure b
 
 `MediaService.render_clip()` center-crops to 1080×1920, encodes H.264 (`libx264`, `yuv420p`) at 30 fps, includes AAC audio when the source has audio, and enables MP4 fast start. It writes `<clip_id>.partial.mp4` and publishes `<clip_id>.mp4` only after a successful, non-empty output. Temporary partial files are cleaned up.
 
-The pipeline retains an explicit legacy/backfill `render_clips()` helper. Normal ingestion and the current clip POST route do not invoke that helper.
+Clip rendering is explicit: the current clip POST route queues only the selected moment and never renders every saved moment during ingestion.
 
 ### Caption generation and highlighting
 

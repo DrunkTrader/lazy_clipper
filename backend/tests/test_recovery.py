@@ -143,7 +143,7 @@ def test_recovered_ingestion_retry_keeps_completed_stages(runtime, monkeypatch):
     unused = UnexpectedService()
     pipeline = Pipeline(runtime.settings, youtube=unused, media=unused, transcriber=unused,
                         analyzer=unused, make_session=runtime.sessions)
-    monkeypatch.setattr(main.JobSupervisor, "ingest", lambda self, project_id: pipeline.run(project_id))
+    monkeypatch.setattr(main.JobSupervisor, "run", lambda self, project_id, clip_id=None: pipeline.run(project_id))
     with runtime.sessions() as session:
         transcript_ids = [row.id for row in session.get(Project, project_id).transcript_segments]
     with TestClient(main.app) as client:

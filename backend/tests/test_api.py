@@ -16,7 +16,7 @@ def api_client(tmp_path, monkeypatch):
 
     reset_settings_cache()
     get_engine.cache_clear()
-    monkeypatch.setattr(main.JobSupervisor, "ingest", lambda self, project_id: None)
+    monkeypatch.setattr(main.JobSupervisor, "run", lambda self, project_id, clip_id=None: None)
     from fastapi.testclient import TestClient
 
     with TestClient(main.app) as client:
@@ -86,7 +86,6 @@ def test_reload_and_duplicate_submission_do_not_enqueue_again(api_client, monkey
     assert submitted == [project_id]
     source.unlink()
     # A GET never repairs/reprocesses missing media; explicit submission can.
-    assert api_client.get(f"/api/v1/projects/{project_id}").json()["video"]["media_url"] is None
     assert submitted == [project_id]
     repaired = api_client.post("/api/v1/ingest", json={"url": "https://youtu.be/dQw4w9WgXcQ"}).json()
     assert repaired == {"project_id": project_id, "status": "queued"}
@@ -204,7 +203,6 @@ def test_source_video_is_not_served(api_client):
     response = api_client.get(f"/api/v1/projects/{project_id}")
     assert response.status_code == 200
     assert response.json()["video"]["youtube_id"] == "dQw4w9WgXcQ"
-    assert response.json()["video"]["media_url"] is None
     assert api_client.get(f"/api/v1/projects/{project_id}/media").status_code == 404
 
 

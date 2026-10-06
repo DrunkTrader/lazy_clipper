@@ -9,7 +9,7 @@ import { bundleEntry } from './regressions.mjs'
 const entry = await bundleEntry('tests/app-entry.ts')
 let instance = 0
 
-async function workspace(t, { apiAvailable = true, ready = true } = {}) {
+async function workspace(t, { apiAvailable = true, ready = true, search = '?project_id=p', fetchResponse } = {}) {
   const { App } = await import(`${entry}#instance=${instance++}`)
   const originalWindow = globalThis.window
   const originalDocument = globalThis.document
@@ -29,7 +29,8 @@ async function workspace(t, { apiAvailable = true, ready = true } = {}) {
   }
   state.Player = Player
   globalThis.window = {
-    location: { search: '?project_id=p', pathname: '/', origin: 'http://test.local' },
+    location: { search, pathname: '/', origin: 'http://test.local' },
+    history: { replaceState() {} },
     YT: apiAvailable ? { Player } : undefined,
     setInterval: (...args) => globalThis.setInterval(...args),
     clearInterval: (...args) => globalThis.clearInterval(...args),
@@ -41,7 +42,7 @@ async function workspace(t, { apiAvailable = true, ready = true } = {}) {
     head: { appendChild: (script) => state.scripts.push(script) },
   }
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
-  t.mock.method(globalThis, 'fetch', async (url) => new Response(JSON.stringify(projectResponse(url))))
+  t.mock.method(globalThis, 'fetch', fetchResponse ?? (async (url) => new Response(JSON.stringify(projectResponse(url)))))
   let tree
   t.after(async () => {
     if (tree) await act(async () => tree.unmount())
@@ -164,4 +165,71 @@ test('script failure can retry after the API becomes available', async (t) => {
   await act(async () => { retry.props.onClick(); await setImmediate() })
   assert.equal(state.instances, 1)
   assert.equal(state.alerts().length, 0)
+})
+
+test('newly available video metadata mounts the player after client-side project creation', async (t) => {
+  let processingStatus = 'QUEUED'
+  let newProjectReads = 0
+  const requests = []
+  const otherProject = { ...projectResponse('/api/v1/projects/p'), id: 'other', title: 'Other video' }
+  const fetchResponse = async (url, init = {}) => {
+    const path = new URL(url, 'http://test.local').pathname
+    requests.push(`${init.method ?? 'GET'} ${path}`)
+    if (init.method === 'POST') return new Response(JSON.stringify({ project_id: 'new', status: 'queued' }), { status: 202 })
+    if (path.endsWith('/projects') && !path.endsWith('/projects/new')) return new Response(JSON.stringify([otherProject]))
+    if (path.endsWith('/status')) {
+      const id = path.split('/').at(-2)
+      return new Response(JSON.stringify({ project_id: id, status: id === 'new' ? processingStatus : 'READY', message: null }))
+    }
+    if (path.endsWith('/projects/new')) {
+      const includeVideo = newProjectReads++ > 0
+      return new Response(JSON.stringify({ ...otherProject, id: 'new', title: 'New video', status: processingStatus, video: includeVideo ? otherProject.video : null }))
+    }
+    if (path.endsWith('/projects/other')) return new Response(JSON.stringify(otherProject))
+    if (path.endsWith('/transcript')) return new Response(JSON.stringify({ project_id: path.split('/').at(-2), segments: [] }))
+    if (path.endsWith('/moments')) return new Response(JSON.stringify({ project_id: path.split('/').at(-2), moments: [] }))
+    if (path.endsWith('/clips')) return new Response(JSON.stringify({ project_id: path.split('/').at(-2), clips: [] }))
+    throw new Error(`Unexpected fixture request: ${path}`)
+  }
+  const state = await workspace(t, { search: '', fetchResponse })
+  const form = state.tree.root.findByType('form')
+  const input = state.tree.root.findByType('input')
+  await act(async () => input.props.onChange({ target: { value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' } }))
+  await act(async () => {
+    form.props.onSubmit({ preventDefault() {} })
+    await setImmediate()
+    await setImmediate()
+  })
+  assert.equal(state.instances, undefined)
+
+  processingStatus = 'INGESTING'
+  await state.tick(4000)
+  assert.equal(state.instances, 1, requests.join(', '))
+  assert.equal(state.player.destroyed, undefined)
+
+  const otherLink = state.tree.root.findAllByType('a').find((node) => node.children.join('') === 'Other video')
+  await act(async () => {
+    otherLink.props.onClick({ preventDefault() {} })
+    await setImmediate()
+  })
+  assert.equal(state.instances, 2)
+  assert.equal(state.destroyed, true)
+})
+
+test('invalid project URLs stay on the form without mounting a player', async (t) => {
+  let posts = 0
+  const state = await workspace(t, {
+    search: '',
+    fetchResponse: async (_url, init = {}) => {
+      if (init.method === 'POST') posts++
+      return new Response('[]')
+    },
+  })
+  const form = state.tree.root.findByType('form')
+  const input = state.tree.root.findByType('input')
+  await act(async () => input.props.onChange({ target: { value: 'not a YouTube URL' } }))
+  await act(async () => form.props.onSubmit({ preventDefault() {} }))
+  assert.equal(posts, 0)
+  assert.equal(state.instances, undefined)
+  assert.equal(state.alerts().length, 1)
 })
